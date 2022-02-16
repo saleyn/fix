@@ -1,6 +1,14 @@
-{"1.1.0",
-[{<<"ranch">>,{pkg,<<"ranch">>,<<"1.7.1">>},0}]}.
+{"1.2.0",
+[{<<"etran">>,{pkg,<<"etran">>,<<"0.3.5">>},0},
+ {<<"parse_trans">>,{pkg,<<"parse_trans">>,<<"3.4.1">>},0},
+ {<<"pmod_transform">>,{pkg,<<"pmod_transform">>,<<"1.1.0">>},0}]}.
 [
 {pkg_hash,[
- {<<"ranch">>, <<"6B1FAB51B49196860B733A49C07604465A47BDB78AA10C1C16A3D199F7F8C881">>}]}
+ {<<"etran">>, <<"A93E92E5361EA85E7D293986551F85E56856EEA6EE0583DFC69F8FA340BB9CEA">>},
+ {<<"parse_trans">>, <<"6E6AA8167CB44CC8F39441D05193BE6E6F4E7C2946CB2759F015F8C56B76E5FF">>},
+ {<<"pmod_transform">>, <<"A3A4FA607B947C90410BC459DCA27F6B60D25D1588D568280F7276AC8767E106">>}]},
+{pkg_hash_ext,[
+ {<<"etran">>, <<"13F56B7981C874B58CBF79EB9ED3FCCF13A47136E95E4CD609AB897C45C68314">>},
+ {<<"parse_trans">>, <<"620A406CE75DADA827B82E453C19CF06776BE266F5A67CFF34E1EF2CBB60E49A">>},
+ {<<"pmod_transform">>, <<"68C7FF7354C0D837681990D093D367FCC617C32570A1009B8E7ACFF6445499AA">>}]}
 ].

@@ -6,12 +6,11 @@ all:
 test:
 	./rebar3 eunit --verbose
 
-header:
-	erl -pa ebin -noshell -s fix_template generate_headers -s init stop
+generate:
+	./code-gen.es -f spec/FIX44.xml
 
-parser:
-	erl -pa ebin -noshell -s fix_template generate_parser -s init stop
-
+nif:
+	make -C c_src
 
 clean:
 	./rebar3 clean

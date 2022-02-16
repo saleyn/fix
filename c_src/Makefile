@@ -1,48 +1,50 @@
 # Based on c_src.mk from erlang.mk by Loic Hoguin <essen@ninenines.eu>
 
-CURDIR := $(shell pwd)
-BASEDIR := $(abspath $(CURDIR)/..)
+CURDIR    := $(shell pwd)
+BASEDIR   := $(abspath $(CURDIR)/..)
+REBAR_ENV ?= $(shell echo "${REBAR_BUILD_DIR}" | sed 's,^.*_build/,,')
 
-PROJECT ?= $(notdir $(BASEDIR))
-PROJECT := $(strip $(PROJECT))
+ERTS_INCLUDE_DIR ?= $(shell erl -noshell -noinput -eval "io:format(\"~ts/erts-~ts/include/\", [code:root_dir(), erlang:system_info(version)]), halt(0).")
+ERL_INTERFACE_INCLUDE_DIR ?= $(shell erl -noshell -noinput -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, include)]), halt(0).")
+ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, lib)]), halt(0).")
 
-REBAR_ENV := $(shell echo ${REBAR_BUILD_DIR} | sed 's,^.*_build/,,')
+SOURCES := $(wildcard fix_nif.cpp) $(wildcard fix_fields*.cpp)
+OBJECTS := $(addsuffix .o,  $(basename $(SOURCES)))
+TARGETS := $(addprefix $(CURDIR)/../priv/, $(addsuffix .so, $(basename $(SOURCES))))
+HEADERS := util.hpp
 
-ERTS_INCLUDE_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~ts/erts-~ts/include/\", [code:root_dir(), erlang:system_info(version)]).")
-ERL_INTERFACE_INCLUDE_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, include)]).")
-ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, lib)]).")
-
-C_SRC_DIR = $(CURDIR)
-#C_SRC_OUTPUT ?= $(CURDIR)/../priv/$(PROJECT).so
-C_SRC_OUTPUT ?= $(CURDIR)/../priv/fix_splitter.so
+all: $(TARGETS)
 
 # System type and C compiler/flags.
 
-UNAME_SYS := $(shell uname -s)
-ifeq ($(UNAME_SYS), Darwin)
-	CC ?= cc
-	CFLAGS ?= -O3 -std=c99 -finline-functions -Wall -Wmissing-prototypes
-	CXXFLAGS ?= -O3 -finline-functions -Wall
-	LDFLAGS ?= -flat_namespace -undefined suppress
-else ifeq ($(UNAME_SYS), FreeBSD)
-	CC ?= cc
-	CFLAGS ?= -O3 -std=c99 -finline-functions -Wall -Wmissing-prototypes
-	CXXFLAGS ?= -O3 -finline-functions -Wall
-else ifeq ($(UNAME_SYS), Linux)
-	CC ?= gcc
-	ifeq ($(REBAR_ENV), test)
-		CFLAGS ?= -g -DDEBUG -std=c99 -finline-functions -Wall -Wmissing-prototypes
-		CXXFLAGS ?= -g -DDEBUG -finline-functions -Wall
-	else
-		CFLAGS ?= -O3 -std=c99 -finline-functions -Wall -Wmissing-prototypes
-		CXXFLAGS ?= -O3 -finline-functions -Wall
-	endif
+ifeq ($(REBAR_ENV),test)
+  ADDFLAGS := -g -DDEBUG -O0
+else
+  ADDFLAGS := -O3
 endif
 
-CFLAGS += -fPIC -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR)
+UNAME_SYS  := $(shell uname -s)
+
+ifeq ($(UNAME_SYS),Darwin)
+  CXX      ?= cc++
+  LDFLAGS  ?= -flat_namespace -undefined suppress
+else ifeq ($(UNAME_SYS),FreeBSD)
+  CXX 		 ?= cc++
+else # ifeq ($(UNAME_SYS),Linux)
+  CXX 		 ?= g++
+endif
+
+CXXFLAGS += $(ADDFLAGS) -std=c++20 -finline-functions -Wall
+
+info:
+	@echo "Targets:  $(TARGETS)"
+	@echo "CXX:      $(CXX)"
+	@echo "CXXFLAGS: $(CXXFLAGS)"
+
+
 CXXFLAGS += -fPIC -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR)
 
-LDLIBS += -L $(ERL_INTERFACE_LIB_DIR) -lei
+LDLIBS  += -L $(ERL_INTERFACE_LIB_DIR) -lei -ldl
 LDFLAGS += -shared
 
 # Verbosity.
@@ -56,28 +58,18 @@ cpp_verbose = $(cpp_verbose_$(V))
 link_verbose_0 = @echo " LD    " $(@F);
 link_verbose = $(link_verbose_$(V))
 
-SOURCES := $(shell find $(C_SRC_DIR) -type f \( -name "*.c" -o -name "*.C" -o -name "*.cc" -o -name "*.cpp" \))
-HEADERS := $(shell find $(C_SRC_DIR) -type f \( -name "*.h" -o -name "*.H" -o -name "*.hh" -o -name "*.hpp" \))
-OBJECTS = $(addsuffix .o, $(basename $(SOURCES)))
-
-COMPILE_C = $(c_verbose) $(CC) $(CFLAGS) $(CPPFLAGS) -c
 COMPILE_CPP = $(cpp_verbose) $(CXX) $(CXXFLAGS) $(CPPFLAGS) -c
 
-$(C_SRC_OUTPUT): $(OBJECTS)
-	@mkdir -p $(BASEDIR)/priv/
-	$(link_verbose) $(CC) $(OBJECTS) $(LDFLAGS) $(LDLIBS) -o $(C_SRC_OUTPUT)
+$(CURDIR)/../priv/%.so: %.o | $(BASEDIR)/priv
+	$(link_verbose) $(CXX) $< $(LDFLAGS) $(LDLIBS) -o $@
 
-%.o: %.c $(HEADERS)
-	$(COMPILE_C) $(OUTPUT_OPTION) $<
-
-%.o: %.cc $(HEADERS)
-	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
-
-%.o: %.C $(HEADERS)
-	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
+$(CURDIR)/../priv:
+	@mkdir -p $@
 
 %.o: %.cpp $(HEADERS)
 	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
 
+.PRECIOUS: $(OBJECTS)
+
 clean:
-	@rm -f $(C_SRC_OUTPUT) $(OBJECTS)
+	@rm -f $(TARGETS) $(OBJECTS)

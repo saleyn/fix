@@ -3,4 +3,4 @@
 
 
 main([]) ->
-  fix_splitter:test().
+  fix_nif:test().
