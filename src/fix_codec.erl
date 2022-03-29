@@ -1,15 +1,15 @@
 %%------------------------------------------------------------------------------
-%% @doc FIX codec implementation
-%%------------------------------------------------------------------------------
-%% @copyright 2022 Serge Aleynikov
+%% Author: Serge Aleynikov <saleyn at gmail dot com>
+%%
 %% The work is derived from Maxim Lapshin's open source work:
 %% https://github.com/maxlapshin/fix under the same open source MIT
 %% licensing terms as the original.
 %%------------------------------------------------------------------------------
--module(fix_codec).
--export([decode/3, decode_msg/1, encode/5, encode/6, encode/7]).
+%% *** This file is auto-generated, don't modify by hand!!! ***
+%%------------------------------------------------------------------------------
 
--compile({parse_transform, etran}).  % Use parse transforms from etran library
+-module(fix_codec).
+-export([decode/2, decode/3, decode_msg/1, encode/5, encode/6, encode/7]).
 
 -include("fix.hrl").
 
@@ -28,10 +28,13 @@
 -spec decode(nif|native, binary(), [binary|full]) ->
   {ok, Rest::binary(), {MatchedFldCount::integer(), Header::#header{},
                         Msg::tuple(), UnparsedFields::list()}}
-     | {more, non_neg_integer()}
-     | error.
-decode(Mode, Bin, Options / []) ->
+    | {more, non_neg_integer()}
+    | error.
+decode(Mode, Bin, Options) ->
   fix_util:decode(Mode, ?FIX_DECODER_MODULE, ?FIX_VARIANT, Bin, Options).
+
+decode(Mode, Bin) ->
+  decode(Mode, Bin, []).
 
 decode_msg(Msg) when is_list(Msg) ->
   fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).
@@ -43,9 +46,6 @@ encode(Mode, Msg, SeqNum, Sender, Target, SendingTime) ->
   encode(Mode, Msg, SeqNum, Sender, Target, SendingTime, ?FIX_BEGIN_STR).
 
 -spec encode(nif|native, tuple(), non_neg_integer(), binary(), binary(),
-             non_neg_integer(), binary()) -> binary().
+            non_neg_integer(), binary()) -> binary().
 encode(Mode, Msg, SeqNum, Sender, Target, SendTime, FixVerStr) ->
   fix_util:encode(Mode, ?FIX_ENCODER_MODULE, Msg, SeqNum, Sender, Target, SendTime, FixVerStr).
-
-
-%encode_field(Key, Val) ->

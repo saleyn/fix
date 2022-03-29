@@ -11,6 +11,8 @@
 -module(fix_fields).
 -export([field/1, field_tag/1]).
 
+-define(SOH, 1).
+
 field(  1) -> {'Account'                             , string, false};
 field(  2) -> {'AdvId'                               , string, false};
 field(  3) -> {'AdvRefID'                            , string, false};
@@ -6978,13 +6980,19 @@ try_encode_val(ID, datetm, V) when is_integer(V) -> encode_tagval(ID, fix_nif:en
 try_encode_val(ID, datetm, V) when is_binary(V)  -> encode_tagval(ID, V);
 try_encode_val(ID, T,      V) -> erlang:error({cannot_encode_val, ID, T, V}).
 
-try_encode_group(ID, [M|_] = V) when is_map(V) ->
+try_encode_group(ID, [{group, _, _M}|_] = V) when is_map(_M) ->
   N = length(V),
-  encode_tagval(ID, [integer_to_binary(N), [encode_field(K,I) || {K,I} <- maps:to_list(M)]]);
+  encode_tagval(ID, [integer_to_binary(N), ?SOH,
+                      [encode_field(K,I) || {group, _, M} <- V, {K,I} <- maps:to_list(M)]], false);
 try_encode_group(ID, []) ->
   encode_tagval(ID, <<"0">>).
 
 encode_tagval(ID, V) ->
+  encode_tagval(ID, V, true).
+encode_tagval(ID, V, true) ->
+  [integer_to_binary(ID), $=, V, ?SOH];
+
+encode_tagval(ID, V, false) ->
   [integer_to_binary(ID), $=, V].
 
 encode_field(Tag, Val) when is_atom(Tag) ->

@@ -39,7 +39,7 @@
   cpp_path = "c_src",
   erl_path = "src",
   inc_path = "include",
-  version  = "",
+  version  = "FIX.4.4",
   variants = [],      %% FIX Variant Name
   variant  = "",      %% FIX Variant Name (required argument)
   var_pfx  = "",      %% FIX variant prefix in lower case
@@ -88,7 +88,7 @@ main(Args) ->
                         {Name::atom(), Type::atom(), [{Enum::string(), Descr::string()}]}},
                       #state{}) ->
   #{ID::integer() => {Name::atom(), Type::atom(), [{Enum::string(), Descr::string()}]}}.
-generate_fields(Fields, FldMap, #state{variant=Variant} = State) ->
+generate_fields(Fields, FldMap, #state{} = State) ->
   Types  = lists:sort(sets:to_list(sets:from_list([T || {field,A,_} <- Fields, {type,T} <- A]))),
   MapDT  = #{'AMT'                => float
             ,'BOOLEAN'            => bool
@@ -245,14 +245,11 @@ generate_fields(Fields, FldMap, #state{variant=Variant} = State) ->
            ]),
   %% Generate fix_fields.erl
   MID = length(integer_to_list(lists:max([ID || {ID, _} <- FldList]))),
-  FN2 = if State#state.elixir ->
-          "Elixir.FixFields"++lists:flatten(string:replace(stringx:titlecase(State#state.var_sfx),"_","."));
-        true ->
-          add_variant_suffix("fix_fields", State)
-        end,
+  FN2 = add_variant_suffix("fix_fields", State),
   ok  = write_file(erlang, src, State, FN2++".erl", [], [
-    "-module(", iif(State#state.elixir, qname(FN2), FN2), ").\n"
-    "-export([field/1, field_tag/1]).\n\n",
+    "-module(", FN2, ").\n"
+    "-export([field/1, field_tag/1]).\n\n"
+    "-define(SOH, 1).\n\n",
     lists:map(fun({ID, {Name, Type, Vals}}) ->
       [
         "field(",string:pad(integer_to_list(ID),MID, leading),") -> {",
@@ -317,45 +314,93 @@ generate_fields(Fields, FldMap, #state{variant=Variant} = State) ->
     "try_encode_val(ID, datetm, V) when is_integer(V) -> encode_tagval(ID, fix_nif:encode_timestamp(V));\n"
     "try_encode_val(ID, datetm, V) when is_binary(V)  -> encode_tagval(ID, V);\n"
     "try_encode_val(ID, T,      V) -> erlang:error({cannot_encode_val, ID, T, V}).\n\n"
-    "try_encode_group(ID, [M|_] = V) when is_map(V) ->\n"
+    "try_encode_group(ID, [{group, _, _M}|_] = V) when is_map(_M) ->\n"
     "  N = length(V),\n"
-    "  encode_tagval(ID, [integer_to_binary(N), [encode_field(K,I) || {K,I} <- maps:to_list(M)]]);\n"
+    "  encode_tagval(ID, [integer_to_binary(N), ?SOH,\n"
+    "                      [encode_field(K,I) || {group, _, M} <- V, {K,I} <- maps:to_list(M)]], false);\n"
     "try_encode_group(ID, []) ->\n"
     "  encode_tagval(ID, <<\"0\">>).\n\n"
     "encode_tagval(ID, V) ->\n"
+    "  encode_tagval(ID, V, true).\n"
+    "encode_tagval(ID, V, true) ->\n"
+    "  [integer_to_binary(ID), $=, V, ?SOH];\n\n"
+    "encode_tagval(ID, V, false) ->\n"
     "  [integer_to_binary(ID), $=, V].\n\n"
     "encode_field(Tag, Val) when is_atom(Tag) ->\n"
     "  {_Num, _Type, Fun} = field_tag(Tag),\n"
     "  Fun(Val).\n\n"
   ]),
-  if Variant == "" ->
-    ok;
-  true ->
-    %% Generate fix_variant_.erl"
-    FN3 = "fix_variant" ++ State#state.var_sfx,
-    ok  = write_file(erlang, src, State, FN3++".erl", [], [
-      "%% @doc FIX encoder/decoder wrappers of the '", Variant, "' FIX variant\n"
-      "\n"
-      "-module(", FN3, ").\n"
-      "\n"
-      "-export([split/1, split/2, tag_to_field/1, field_to_tag/1]).\n"
-      "-export([decode_field_value/2, encode_field_value/2, list_field_values/1]).\n"
-      "\n"
-      "split(Bin)                       -> fix_nif:split(", Variant, ", Bin).\n"
-      "\n"
-      "split(Bin, Opts)                 -> fix_nif:split(", Variant, ", Bin, Opts).\n"
-      "\n"
-      "tag_to_field(Field)              -> fix_nif:tag_to_field(", Variant, ", Field).\n"
-      "\n"
-      "field_to_tag(Field)              -> fix_nif:field_to_tag(", Variant, ", Field).\n"
-      "\n"
-      "encode_field_value(Field, Value) -> fix_nif:encode_field_value(", Variant, ", Field, Value).\n"
-      "\n"
-      "decode_field_value(Field, Value) -> fix_nif:decode_field_value(", Variant, ", Field, Value).\n"
-      "\n"
-      "list_field_values(Field)         -> fix_nif:list_field_values(", Variant, ", Field).\n"
-    ])
-  end,
+  ok = write_file(erlang, src, State, "fix_codec" ++ State#state.var_sfx ++ ".erl", [], [
+    "-module(fix_codec).\n"
+    "-export([decode/2, decode/3, decode_msg/1, encode/5, encode/6, encode/7]).\n"
+    "\n"
+    "-include(\"fix.hrl\").\n"
+    "\n"
+    "-define(FIX_VARIANT,         ", nvl(State#state.variant, "default"), ").\n"
+    "-define(FIX_DECODER_MODULE,  fix_decoder", State#state.var_sfx, ").\n"
+    "-define(FIX_ENCODER_MODULE,  fix_fields", State#state.var_sfx, ").\n"
+    "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
+    "\n"
+    "%% @doc Parse the first FIX message in the Bin.\n"
+    "%% The function returns\n"
+    "%% `{ok, BinRest, {MatchedFldCount, Header, Msg, UnparsedFields}}', where\n"
+    "%% `BinRest' is the unparsed trailing binary. `MatchedFldCount' is the number\n"
+    "%% of parsed fields in the `Msg'. `Header' is the FIX message header.\n"
+    "%% `Msg' is a record containing the FIX message body. `UnparsedFields' are\n"
+    "%% the fields not recognized by the message parser.\n"
+    "-spec decode(nif|native, binary(), [binary|full]) ->\n"
+    "  {ok, Rest::binary(), {MatchedFldCount::integer(), Header::#header{},\n"
+    "                        Msg::tuple(), UnparsedFields::list()}}\n"
+    "    | {more, non_neg_integer()}\n"
+    "    | error.\n"
+    "decode(Mode, Bin, Options) ->\n"
+    "  fix_util:decode(Mode, ?FIX_DECODER_MODULE, ?FIX_VARIANT, Bin, Options).\n"
+    "\n"
+    "decode(Mode, Bin) ->\n"
+    "  decode(Mode, Bin, []).\n"
+    "\n"
+    "decode_msg(Msg) when is_list(Msg) ->\n"
+    "  fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).\n"
+    "\n"
+    "encode(Mode, Msg, SeqNum, Sender, Target) ->\n"
+    "  encode(Mode, Msg, SeqNum, Sender, Target, fix_util:now()).\n"
+    "\n"
+    "encode(Mode, Msg, SeqNum, Sender, Target, SendingTime) ->\n"
+    "  encode(Mode, Msg, SeqNum, Sender, Target, SendingTime, ?FIX_BEGIN_STR).\n"
+    "\n"
+    "-spec encode(nif|native, tuple(), non_neg_integer(), binary(), binary(),\n"
+    "            non_neg_integer(), binary()) -> binary().\n"
+    "encode(Mode, Msg, SeqNum, Sender, Target, SendTime, FixVerStr) ->\n"
+    "  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, Msg, SeqNum, Sender, Target, SendTime, FixVerStr).\n"
+  ]),
+  %%if Variant == "" ->
+  %%  ok;
+  %%true ->
+  %%  %% Generate fix_variant_.erl"
+  %%  FN3 = "fix_variant" ++ State#state.var_sfx,
+  %%  ok  = write_file(erlang, src, State, FN3++".erl", [], [
+  %%    "%% @doc FIX encoder/decoder wrappers of the '", Variant, "' FIX variant\n"
+  %%    "\n"
+  %%    "-module(", FN3, ").\n"
+  %%    "\n"
+  %%    "-export([split/1, split/2, tag_to_field/1, field_to_tag/1]).\n"
+  %%    "-export([decode_field_value/2, encode_field_value/2, list_field_values/1]).\n"
+  %%    "\n"
+  %%    "split(Bin)                       -> fix_nif:split(", Variant, ", Bin).\n"
+  %%    "\n"
+  %%    "split(Bin, Opts)                 -> fix_nif:split(", Variant, ", Bin, Opts).\n"
+  %%    "\n"
+  %%    "tag_to_field(Field)              -> fix_nif:tag_to_field(", Variant, ", Field).\n"
+  %%    "\n"
+  %%    "field_to_tag(Field)              -> fix_nif:field_to_tag(", Variant, ", Field).\n"
+  %%    "\n"
+  %%    "encode_field_value(Field, Value) -> fix_nif:encode_field_value(", Variant, ", Field, Value).\n"
+  %%    "\n"
+  %%    "decode_field_value(Field, Value) -> fix_nif:decode_field_value(", Variant, ", Field, Value).\n"
+  %%    "\n"
+  %%    "list_field_values(Field)         -> fix_nif:list_field_values(", Variant, ", Field).\n"
+  %%  ])
+  %%end,
   FldMap.
 
 generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = State) ->
@@ -621,10 +666,12 @@ update(Variant, S = #state{config = CfgF}) ->
   {ok,CC} = try file:consult(C) catch _:Err ->
               abort("Cannot read overrides file ~s: ~p", [C, Err])
             end,
-  VarEmpty = Variant=="" orelse Variant=="default",
-  S#state{variant = Variant,
-          var_pfx = iif(VarEmpty, "", string:to_lower(Variant)++"_"),
-          var_sfx = iif(VarEmpty, "", "_" ++ string:to_lower(Variant)),
+  VEmpty  = Variant=="" orelse Variant=="default",
+  Vsn     = proplists:get_value(version, CC, S#state.version),
+  S#state{version = Vsn,
+          variant = Variant,
+          var_pfx = iif(VEmpty, "", string:to_lower(Variant)++"_"),
+          var_sfx = iif(VEmpty, "", "_" ++ string:to_lower(Variant)),
           file    = File,
           config  = CC}.
 
@@ -642,6 +689,7 @@ usage() ->
     "     -var  Variant       - FIX Variant name (this is a required argument)\n"
     "     -cdir Path          - Output directory for C++ files    (default: ./c_src)\n"
     "     -edir Path          - Output directory for Erlang files (default: ./src)\n"
+    "     -vsn  FixVSN        - Fix version tag (#8), default: \"FIX.4.4\"\n"
     "     -q                  - Quiet (don't print WARNING's)\n"
     "     -d [Level]          - Set debug level (no files get saved)\n"
     "     -h | --help         - This help screen\n"

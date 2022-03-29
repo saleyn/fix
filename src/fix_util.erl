@@ -91,19 +91,19 @@ encode(Mode, EncoderMod, Msg, SeqNum, Sender, Target, SendingTime, FixVerStr)
     {'SenderCompID', Sender},
     {'TargetCompID', Target},
     {'MsgSeqNum',    SeqNum}
-    | maps:to_list(Fields)],
+    | [KV || KV = {_,V} <- maps:to_list(Fields), V /= undefined]],
   Body1 =
     case maps:get('SendingTime', Fields, undefined) of
       undefined ->
         [encode(EncoderMod, Body0),
-         encode_field(EncoderMod, 'SendingTime', timestamp()), 1];
+         encode_field(EncoderMod, 'SendingTime', timestamp())];
       _ ->
         encode(EncoderMod, Body0)
     end,
   BodyLen = iolist_size(Body1),
   Body2   = [
-    encode_field(EncoderMod, 'BeginString', FixVerStr), 1,
-    encode_field(EncoderMod, 'BodyLength',  BodyLen),   1,
+    encode_field(EncoderMod, 'BeginString', FixVerStr),
+    encode_field(EncoderMod, 'BodyLength',  BodyLen),
     Body1
   ],
   update_checksum(Mode, EncoderMod, Body2).
@@ -115,15 +115,17 @@ encode_field(CodecMod, Tag, Val) when is_atom(CodecMod), is_atom(Tag) ->
 -spec encode(atom(), binary() | proplists:proplist()) -> iolist().
 encode(_CodecMod, Packet) when is_binary(Packet) -> Packet;
 encode( CodecMod, [{K,V}|T]) when is_atom(K) ->
-  [encode_field(CodecMod, K, V), 1 | encode(CodecMod, T)];
+  [encode_field(CodecMod, K, V) | encode(CodecMod, T)];
 encode( CodecMod, [{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->
-  [encode_field(CodecMod, K, V), 1 | encode(CodecMod, T)];
+  [encode_field(CodecMod, K, V) | encode(CodecMod, T)];
 encode(_Variant, []) ->
   [].
 
 -spec dump(binary() | iolist()) -> binary().
-dump(Bin) ->
-  binary:replace(Bin, <<1>>, <<"|">>, [global]).
+dump(Bin) when is_binary(Bin) ->
+  binary:replace(Bin, <<1>>, <<"|">>, [global]);
+dump(IOList) when is_list(IOList) ->
+  dump(iolist_to_binary(IOList)).
 
 -spec undump(binary()) -> binary().
 undump(Bin) when is_binary(Bin) ->
@@ -138,7 +140,7 @@ do_split(native, Variant, Bin, Opts) -> fix_native:split(Variant, Bin, Opts).
 
 -spec update_checksum(nif|native, atom(), [{atom(), any()}]) -> binary().
 update_checksum(nif, EncoderMod, Msg) ->
-  Body = [Msg, encode_field(EncoderMod, 'CheckSum', <<"000">>), 1],
+  Body = [Msg, encode_field(EncoderMod, 'CheckSum', <<"000">>)],
   Bin  = iolist_to_binary(Body),
   fix_nif:update_checksum(Bin);
 update_checksum(native, _EncoderMod, Bin) ->
