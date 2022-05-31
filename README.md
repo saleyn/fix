@@ -4,7 +4,7 @@ This is a non-backward compatible fork of the
 [original work](https://github.com/maxlapshin/fix) by Maxim Lapshin,
 in which we implement performance improvements to the
 NIF FIX parser.  The intent was to improve and convert this project to a FIX
-marshaling library suitable for use in other projects rather than to have a
+marshaling library suitable for use in other projects rather than having a
 functional FIX client/server implementation.
 
 ## FIX protocol

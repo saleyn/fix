@@ -1,3 +1,10 @@
+//------------------------------------------------------------------------------
+// Author: Serge Aleynikov <saleyn at gmail dot com>
+//
+// The work is derived from Maxim Lapshin's open source work:
+// https://github.com/maxlapshin/fix under the same open source MIT
+// licensing terms as the original.
+//------------------------------------------------------------------------------
 #include <erl_nif.h>
 #include <sys/mman.h>
 #include <fcntl.h>
