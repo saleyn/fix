@@ -9,8 +9,11 @@ test:
 generate:
 	./code-gen.es -f spec/FIX44.xml
 
-nif:
+nif: priv
 	make -C c_src
 
 clean:
 	rebar3 clean
+
+priv:
+	mkdir -p $@
