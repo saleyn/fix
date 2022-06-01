@@ -331,7 +331,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     "  Fun(Val).\n\n"
   ]),
   ok = write_file(erlang, src, State, "fix_codec" ++ State#state.var_sfx ++ ".erl", [], [
-    "-module(fix_codec).\n"
+    "-module(fix_codec", State#state.var_sfx, ").\n"
     "-export([decode/2, decode/3, decode_msg/1, encode/5, encode/6, encode/7]).\n"
     "\n"
     "-include(\"fix.hrl\").\n"
