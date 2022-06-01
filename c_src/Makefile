@@ -10,8 +10,10 @@ ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -eval "io:format(\"~ts\", [code:li
 
 SOURCES := $(wildcard fix_nif.cpp) $(wildcard fix_fields*.cpp)
 OBJECTS := $(addsuffix .o,  $(basename $(SOURCES)))
-TARGETS := $(addprefix $(CURDIR)/../priv/, $(addsuffix .so, $(basename $(SOURCES))))
+TARGETS := $(addprefix $(BASEDIR)/priv/, $(addsuffix .so, $(basename $(SOURCES))))
 HEADERS := util.hpp
+
+INC_DIR := 
 
 all: $(TARGETS)
 
@@ -34,7 +36,7 @@ else # ifeq ($(UNAME_SYS),Linux)
   CXX 		 ?= g++
 endif
 
-CXXFLAGS += $(ADDFLAGS) -std=c++20 -finline-functions -Wall
+CXXFLAGS += $(ADDFLAGS) $(INC_DIR) -std=c++20 -finline-functions -Wall
 
 info:
 	@echo "Targets:  $(TARGETS)"
@@ -60,10 +62,10 @@ link_verbose = $(link_verbose_$(V))
 
 COMPILE_CPP = $(cpp_verbose) $(CXX) $(CXXFLAGS) $(CPPFLAGS) -c
 
-$(CURDIR)/../priv/%.so: %.o | $(BASEDIR)/priv
+$(BASEDIR)/priv/%.so: %.o | $(BASEDIR)/priv
 	$(link_verbose) $(CXX) $< $(LDFLAGS) $(LDLIBS) -o $@
 
-$(CURDIR)/../priv:
+$(BASEDIR)/priv:
 	@mkdir -p $@
 
 %.o: %.cpp $(HEADERS)

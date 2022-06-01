@@ -1059,12 +1059,17 @@ write_file(Type, SrcOrInc, #state{outdir=Cwd, gen=Gen} = State, File, Header, Da
       ok
   end.
 
-copy_makefile(#state{src_dir = SrcDir, cur_dir = CurDir, cpp_path = CppPath}) ->
-  Makefile = filename:join(filename:join(CurDir, CppPath), "Makefile"),
+copy_makefile(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath}) ->
+  IncDir   = filename:join(SrcDir, "c_src"),
+  Makefile = filename:join(filename:join(Cwd, CppPath), "Makefile"),
   case filelib:is_regular(Makefile) of
     true  -> ok;
     false ->
-      Dest = filename:join(CppPath, "Makefile"),
-      io:format("Writing file: ~s\n", [Dest]),
-      {ok,_} = file:copy(filename:join(SrcDir, Dest), Makefile)
+      DstFile = filename:join(CppPath, "Makefile"),
+      SrcFile = filename:join(IncDir,  "Makefile"),
+      io:format("Writing file: ~s\n", [DstFile]),
+      {ok,F}  = file:read_file(SrcFile),
+      Data    = re:replace(F, "INC_DIR\\s*:=[^\n]+", "INC_DIR := -I" ++ IncDir ++ "\n",
+                           [{return, binary}]),
+      ok      = file:write_file(Makefile, Data)
   end.
