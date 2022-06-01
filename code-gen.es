@@ -823,7 +823,7 @@ group_name(A) when is_tuple(A) ->
 group_name(N) when is_atom(N) ->
   case atom_to_list(N) of
     "No" ++ Name -> list_to_atom("grp"++Name);
-    _            -> N
+    Name         -> list_to_atom("grp"++Name)
   end;
 group_name("No"++Rest) ->
   list_to_atom("grp"++Rest);
