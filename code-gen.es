@@ -601,6 +601,7 @@ parse(["-d", Lvl | T], S) -> try
 parse(["-e"      | T], S) -> parse(T, S#state{elixir   = true});
 parse(["-ge"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [erlang])});
 parse(["-gc"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [cpp])});
+parse(["-p", V   | T], S) -> true = code:add_patha(V), parse(T, S);
 parse(["-q"      | T], S) -> parse(T, S#state{quiet    = true});
 parse(["-d"      | T], S) -> parse(T, S#state{debug    = 1});
 parse(["-h"      | _],_S) -> usage();
@@ -825,7 +826,9 @@ group_name(N) when is_atom(N) ->
     _            -> N
   end;
 group_name("No"++Rest) ->
-  list_to_atom("grp"++Rest).
+  list_to_atom("grp"++Rest);
+group_name(Name) when is_list(Name) ->
+  list_to_atom("grp"++Name).
 
 -spec get_all_groups(list(), fun((atom()) -> integer()), list()) ->
         [{Msg::atom(),
