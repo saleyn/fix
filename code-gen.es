@@ -69,7 +69,7 @@ main(Args) ->
   lists:foreach(fun(Variant) ->
     State = update(Variant, State0),
 
-    {Header, _Trailer, Messages, AllMsgGrps, Fields, FldMap} =
+    {_FixVsn, Header, _Trailer, Messages, AllMsgGrps, Fields, FldMap} =
       read_file(State),
 
     generate_fields  (Fields,  FldMap,   State),
@@ -119,7 +119,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
   [maps:find(T, MapDT) == error andalso throw("Found unknown field type: " ++ atom_to_list(T))
    || T <- Types],
   FldList      = maps:to_list(FldMap),
-  FldMapByName = maps:fold(fun(ID,{Nm,_Tp,_V},A) -> A#{Nm => ID} end, #{}, FldMap),
+  FldMapByName = maps:fold(fun(ID,{Nm,_Tp,_IsGrp,_V},A) -> A#{Nm => ID} end, #{}, FldMap),
   MaxID  = lists:foldl(fun({field, AA, _}, I) -> max(I, get_attr(number, AA)) end, 0, Fields),
   MaxLen = lists:foldl(fun({field, AA, _}, I) -> max(I, length(atom_name(get_attr(name, AA),State))) end, 0, Fields),
   Filenm = add_variant_suffix("fix_fields.cpp", State),
@@ -129,17 +129,18 @@ generate_fields(Fields, FldMap, #state{} = State) ->
             "std::vector<Field> make_all_fields(FixVariant* fvar)\n"
             "{\n"
             "  assert(fvar);\n"
-            "  return std::vector<Field>{{\n",
+            "  auto vec = std::vector<Field>();\n"
+            "  vec.reserve(", integer_to_list(MaxID+1), ");\n",
             lists:map(fun(I) ->
               % ID::integer(), FieldName::quoted_string(), FieldType::string(),
               % FieldType::atom(), Vals::list(), LenFldName::quoted_string()
               {ID, Name, Type, RawType, Vals, LenFldName, LenFldID} =
                 case maps:find(I, FldMap) of
-                  {ok, {N, 'NUMINGROUP' = T, V}} ->
+                  {ok, {N, 'NUMINGROUP' = T, _FldOrGrp, V}} ->
                     NN         = atom_to_list(N),
                     {Nm, LenF} = {NN, NN}, %% {group_name(NN), NN},
                     {I, Nm, atom_to_list(T), T, V, q(LenF), I};
-                  {ok, {N, 'DATA' = T, V}} ->
+                  {ok, {N, 'DATA' = T, _FldOrGrp, V}} ->
                     NN = atom_to_list(N),
                     {LF,LI} = % The length field name and ID of the data field has this suffix
                       lists:foldl(fun(Sfx, Ac) ->
@@ -154,7 +155,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
                     LF == "" andalso
                       throw("Cannot find length field '" ++ LF ++ "' for field " ++ qname(NN)),
                     {I, NN, atom_to_list(T), T, V, q(LF), LI};
-                  {ok, {N, T, V}} ->
+                  {ok, {N, T, _FldOrGrp, V}} ->
                     {I, atom_to_list(N), atom_to_list(T), T, V, "", 0};
                   error ->
                     {0, "nullptr", "UNDEFINED", undefined, [], "", 0}
@@ -166,70 +167,72 @@ generate_fields(Fields, FldMap, #state{} = State) ->
               ME  = LE+2,
               MD  = iif(Vals==[], 0, lists:max([length(atom_name(caml_case(DD),State)) || {_,DD} <- Vals])+2),
               NVals = lists:zip(lists:seq(0, LL-1), Vals),
+              Doc   = [" //--- Tag# ", integer_to_list(I), iif(ID==0, "", " "++q(Name)), "\n"],
               [
-                "    //--- Tag# ", integer_to_list(I), iif(ID==0, "", " "++q(Name)), "\n",
-                "    Field{",
+                "  vec.emplace_back(Field{",
                 if ID==0 ->
-                  "},\n";
+                  ["});", Doc];
                 true ->
                   [
-                  "\n"
-                  "      fvar,\n"
-                  "      ", LID, ",\n"
-                  "      ", iif(ID==0, "nullptr", q(Name)), ",\n"
-                  "      FieldType::", Type, ",\n"
-                  "      ", dtype(RawType, MapDT), ",\n"
-                  "      std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
+                  "   ", Doc,
+                  "    fvar,\n"
+                  "    ", LID, ",\n"
+                  "    ", iif(ID==0, "nullptr", q(Name)), ",\n"
+                  "    FieldType::", Type, ",\n"
+                  "    ", dtype(RawType, MapDT), ",\n"
+                  "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
                   lists:map(fun({II,{CC,DD}}) ->
                     io_lib:format(
-                  "        {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
+                  "      {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
                                   [qpad(CC,ME), qpad(atom_name(caml_case(DD),State), MD), II])
                   end, NVals),
-                  iif(Vals==[], "", "      }},\n"),
-                  "      ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
-                  "      ", integer_to_list(LenFldID), ",\n",
+                  iif(Vals==[], "", "    }},\n"),
+                  "    ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
+                  "    ", integer_to_list(LenFldID), ",\n",
                   if Vals==[] ->
-                    "      nullptr";
+                    "    nullptr";
                   true ->
-                    "      [](const Field& f, ErlNifEnv* env, const char* code, int len) {"
+                    "    [](const Field& f, ErlNifEnv* env, const char* code, int len) {"
                   end,
                   if
                     Vals==[] ->
                       "\n";
                     LE == 1 ->
                       ["\n"
-                       "        switch (code[0]) {\n",
-                       [io_lib:format("          case '~s': return f.value_atom(~s); // ~s\n",
+                       "      if (!len) [[unlikely]] return am_undefined;\n"
+                       "      switch (code[0]) {\n",
+                       [io_lib:format("        case '~s': return f.value_atom(~s); // ~s\n",
                                       [CC,spad(integer_to_list(II),LEn),DD])
                         || {II,{CC,DD}} <- NVals],
-                       "          default: return am_undefined;\n"
-                       "        }\n"
+                       "        default: return am_undefined;\n"
+                       "      }\n"
                       ];
                     LE > 8 ->
                       ["\n"
-                       "        auto   fc = f.value(std::string_view(code, len));\n",
-                       "        return fc ? fc->get_atom(env) : am_undefined;\n"
+                       "      auto   fc = f.value(std::string_view(code, len));\n",
+                       "      return fc ? fc->get_atom(env) : am_undefined;\n"
                       ];
                     true ->
                       MML = integer_to_list(lists:max([length(to_char_str(CC)) || {CC,_} <- Vals])),
                       NW  = integer_to_list(length(integer_to_list(length(Vals)))),
                       ["\n"
-                       "        auto hash = len == 1 ? uint64_t(code[0]) : hash_val(code, len);\n"
-                       "        switch (hash) {\n",
-                       [io_lib:format("          case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
+                       "      auto hash = len == 1 ? uint64_t(code[0]) : hash_val(code, len);\n"
+                       "      switch (hash) {\n",
+                       [io_lib:format("        case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
                           [iif(length(CC)==1, qname(CC), to_char_str(CC)),II,caml_case(DD)])
                         || {II,{CC,DD}} <- NVals],
-                       "          default: return am_undefined;\n"
-                       "        }\n"
+                       "        default: return am_undefined;\n"
+                       "      }\n"
                       ]
                   end,
-                  iif(Vals==[], "", "      },\n"),
-                  "    },\n"
+                  iif(Vals==[], "", "    },\n"),
+                  "  });\n"
                   ]
                 end
               ]
             end, lists:seq(0, MaxID)),
-            "  }};\n"
+            "\n"
+            "  return vec;\n"
             "}\n\n"
             "} // namespace\n\n",
             sep(cpp, 0),
@@ -250,7 +253,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     "-module(", FN2, ").\n"
     "-export([field/1, field_tag/1]).\n\n"
     "-define(SOH, 1).\n\n",
-    lists:map(fun({ID, {Name, Type, Vals}}) ->
+    lists:map(fun({ID, {Name, Type, _FldOrGrp, Vals}}) ->
       [
         "field(",string:pad(integer_to_list(ID),MID, leading),") -> {",
         string:pad(qname(Name,State),MaxLen+2), ", ",
@@ -275,7 +278,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
        end,
        " end};\n"
       ]
-     end || {ID, {Name, Type, Vals}} <- FldList],
+     end || {ID, {Name, Type, _FldOrGrp, Vals}} <- FldList],
     "field_tag(_) -> erlang:error(badarg).\n\n",
     [begin
       Tp = maps:get(Type, MapDT),
@@ -301,7 +304,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
         []
        end
       ]
-    end || {ID, {_Name, Type, Vals}} <- lists:sort(FldList), Vals /= []],
+    end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
     "\n"
     "try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, <<\"Y\">>);\n"
     "try_encode_val(ID, bool,   false)                -> encode_tagval(ID, <<\"N\">>);\n"
@@ -404,7 +407,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
   FldMap.
 
 generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = State) ->
-  {'MsgType', _, MsgTypes} = maps:get(35, FldMap),
+  {'MsgType', _, _, MsgTypes} = maps:get(35, FldMap),
   MTW  = lists:max([length(atom_to_list(Msg)) || {Msg, _Type, _Cat, _Fields} <- Messages]),
   FNm  = add_variant_suffix("fix_decoder", State),
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
@@ -489,7 +492,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
   ]).
 
 generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sfx=SFX} = State) ->
-  NameMap   = maps:fold(fun(ID, {Name, _Type, _Vals}, A) -> A#{Name => ID} end, #{}, FldMap),
+  NameMap   = maps:fold(fun(ID, {Name, _Type, _FldOrGrp, _Vals}, A) -> A#{Name => ID} end, #{}, FldMap),
   MaxIDLen  = length(integer_to_list(maps:fold(fun(ID, _, A) -> max(ID,A) end, 0, FldMap))),
   Mandatory = proplists:get_value(mandatory, Cfg, #{}),
   %% Check mandatory message configs for invalid message names
@@ -705,7 +708,10 @@ usage() ->
 read_file(#state{file = Xml, schema = Schema, config = Config}) ->
   InclMsgs   = proplists:get_value(include_app_messages, Config, []),
   % Read file using the Schema to format value types
-  {fix, _,L} = xmltree:file(Xml, Schema),
+  {fix,AA,L} = xmltree:file(Xml, Schema),
+  MajorVsn   = get_attr(major, AA),
+  MinorVsn   = get_attr(minor, AA),
+  FixVsn     = MajorVsn*10 + MinorVsn,
   Components = [C || {components, _, I} <- L, C <- I],
   [Header]   = [{header,  "", admin, expand_components(I, Components, header)}
                 || {header,     _, I} <- L],
@@ -727,6 +733,8 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
   AllMsgs    = [Header, Trailer | Messages],
   UsedFields = sets:from_list(lists:foldl(Fun, [], AllMsgs)),
 
+  %io:format("AllMsgs: ~p\n", [AllMsgs]),
+
   % Make sure that the names of messages are consistent with what's defined
   % in the field#35 (i.e. description of enum values of this field must match
   % the message names under the "messages" node.
@@ -745,20 +753,30 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
                   end
                 end, [], Fields)),
 
-  FldMap = lists:foldl(fun({_FldOrGrp, A, V} = F, M) ->
-    Name = get_attr(name,  A),
-    ID   = get_attr(number,A),
-    Type = get_attr(type,  A),
+  FldMap  = lists:foldl(fun({FldOrGrpTag, A, V} = F, M) ->
+    Name  = get_attr(name,  A),
+    ID    = get_attr(number,A),
+    Type  = get_attr(type,  A),
     Name /= undefined orelse throw({unknown_field_name, F}),
     is_integer(ID)    orelse throw({unknown_field_number, Name, ID}),
-    M#{ID => {Name, Type, [{get_attr(enum, AA), get_attr(description, AA)} || {value, AA, _} <- V]}}
+    M#{ID => {Name, Type, FldOrGrpTag, [{get_attr(enum, AX), get_attr(description, AX)} || {value, AX, _} <- V]}}
   end, #{}, Fields2),
 
-  NameMap   = maps:fold(fun(ID, {Name, _Type, _Vals}, A) -> A#{Name => ID} end, #{}, FldMap),
-  Name2ID  = fun(N) -> maps:get(N, NameMap) end,
-  AllGrps  = get_all_groups([Header | Messages], Name2ID, []),
+  NameMap = maps:fold(fun(ID, {Name, _Type, _FldOrGrp, _Vals}, A) -> A#{Name => ID} end, #{}, FldMap),
+  Name2ID = fun(N) -> maps:get(N, NameMap) end,
+  AllGrps = get_all_groups([Header | Messages], Name2ID, []),
+
+  %% Update group tags
+  FldMap2 = lists:foldl(fun({_, F, _}, M) ->
+    {ok, ID} = maps:find(F, NameMap),
+    %% E.g. {'NoAllocs','INT',field,[]}
+    {ok, {Name1, _Type, _Field, Vals1}} = maps:find(ID, FldMap),
+    M#{ID => {Name1, 'NUMINGROUP', group, Vals1}}
+  end, FldMap, AllGrps),
+
+  %io:format("AllGrps: ~p\n", [AllGrps]),
   %io:format("MsgTypes:\n~p\n", [MsgTypes]),
-  {Header, Trailer, Messages, AllGrps, Fields2, FldMap}.
+  {FixVsn, Header, Trailer, Messages, AllGrps, Fields2, FldMap2}.
 
 %%%-----------------------------------------------------------------------------
 %%% Main code generation function

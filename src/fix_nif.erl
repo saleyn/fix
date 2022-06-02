@@ -73,6 +73,8 @@ init_nif() ->
   end, [], [Priv | application:get_env(fix, fix_variants, [])]),
 
   Dbg  = list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")),
+  Dbg > 0 andalso
+    io:format("FIX so files: ~p\n", [Files]),
   Load = erlang:load_nif(Name, [{so_files, Files}, {debug, Dbg}]),
 
   case Load of

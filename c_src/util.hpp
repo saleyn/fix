@@ -19,6 +19,13 @@
 #define IS_LIKELY(Expr)   __builtin_expect(!!(Expr), 1)
 #define IS_UNLIKELY(Expr) __builtin_expect(!!(Expr), 0)
 
+#define DBGPRINT(Debug, Level, Fmt, ...)                \
+  do {                                                  \
+    if (Debug >= Level)                                 \
+      fprintf(stderr, Fmt " [%s:%d]\r\n", __VA_ARGS__,  \
+              basename(__FILE__), __LINE__);            \
+  } while(0)
+
 //------------------------------------------------------------------------------
 // Static variables
 //------------------------------------------------------------------------------
@@ -99,6 +106,16 @@ struct Field;
 using DecFieldValFun = std::function<ERL_NIF_TERM (const Field&, ErlNifEnv*, const char*, int len)>;
 using AtomToTagMap   = std::unordered_map<ERL_NIF_TERM,     int>;
 using NameToTagMap   = std::unordered_map<std::string_view, int>;
+
+namespace {
+  template <int N>
+  inline const char* basename(const char (&file)[N]) {
+    auto p   = file + N;
+    auto end = file;
+    while (p != end && *p != '/') --p;
+    return p == end ? file : p+1;
+  }
+}
 
 //------------------------------------------------------------------------------
 // Field
@@ -602,6 +619,8 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files, int debu
         (to_string("FIX Variant shared object file '%s' not found!", file.c_str()));
 
     // Load the FIX variant implementation
+    DBGPRINT(debug, 1, "FIX: loading %s", file.c_str());
+
     auto p  = new FixVariant(this, file);
     m_variants.emplace_back(std::unique_ptr<FixVariant>(p));
     auto am = enif_make_atom(m_env, p->variant().c_str());
@@ -664,7 +683,6 @@ inline FixVariant
     throw std::runtime_error(buf);
   }
 
-
   auto find_fun = [this, &buf, &so_file](const char* fun_name) {
     void*   sym = dlsym(m_so_handle, fun_name);
 
@@ -681,12 +699,14 @@ inline FixVariant
   };
 
   auto get_variant_name = [&find_fun](const char* fun) {
-    auto f = reinterpret_cast<fix_variant_name>(find_fun(fun));
+    auto   f = reinterpret_cast<fix_variant_name>(find_fun(fun));
+    assert(f);
     return std::string(f());
   };
 
   auto get_fields = [this, &find_fun](const char* fun) {
     auto    factory = reinterpret_cast<fields_factory>(find_fun(fun));
+    assert (factory);
     return (factory)(this);
   };
 
@@ -699,6 +719,9 @@ inline FixVariant
     throw std::runtime_error
       ("FIX variant '" + m_variant + "' empty fields: " + so_file);
 
+  DBGPRINT(m_pers->debug(), 1, "FIX(%s): initializing %lu fields", 
+      m_variant.c_str(), m_fields.size());
+
   m_bins.resize(0);
   m_bins.reserve(m_fields.size());
 
@@ -707,6 +730,10 @@ inline FixVariant
     // Initialize m_bins[i] with integer_to_binary(i)
     char s[16];
     int  len = snprintf(s, sizeof(s), "%d", i);
+
+    DBGPRINT(m_pers->debug(), 4, "FIX(%s): initializing binary: %s", 
+      m_variant.c_str(), s);
+
     m_bins.emplace_back(create_binary(env(), std::string_view(s, len)));
 
     // Populate the map that converts field names to tags

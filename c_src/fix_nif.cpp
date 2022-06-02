@@ -64,7 +64,7 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   if (argc < 2 || !enif_inspect_binary(env, argv[1], &input)) [[unlikely]]
     return enif_make_badarg(env);
   if (!pers->get(argv[0], var)) [[unlikely]]
-    enif_raise_exception(env, am_badvariant);
+    return enif_raise_exception(env, am_badvariant);
   if (argc == 3) {
     if (!enif_is_empty_list(env, argv[2])) {
       if (!enif_is_list(env, argv[2])) [[unlikely]]
@@ -81,6 +81,8 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
       }
     }
   }
+
+  assert(var);
 
   const auto* begin = input.data;
   const auto* end   = input.data + input.size;
@@ -629,7 +631,7 @@ static int init_env
   (void** priv_data, std::vector<std::string> const& so_files, int debug)
 {
   // Init persistent environment that owns some binaries shared across NIF calls
-  try   {*priv_data = (void*)(new Persistent(so_files));}
+  try   {*priv_data = (void*)(new Persistent(so_files, debug));}
   catch (std::exception const& e)
   {
     std::ostringstream str;
@@ -660,7 +662,6 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
   int                       debug = 0;
   const char*               errs;
   ERL_NIF_TERM arg_files=0, head, list=load_info;
-
 
   std::vector<std::string>  so_files;
 
@@ -723,6 +724,9 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
   if (so_files.empty()) {
     errs = "Missing required so_files argument!";
     goto ERR;
+  } else if (debug > 0) {
+    for (auto& f : so_files)
+      DBGPRINT(debug, 1, "FIX: file %s", f.c_str());
   }
 
   return init_env(priv_data, so_files, debug);
