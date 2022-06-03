@@ -217,8 +217,8 @@ bin_to_integer_test() ->
   ?assertEqual({1,1},  bin_to_integer(<<"1">>)),
   ?assertEqual({2,-1}, bin_to_integer(<<"-1">>)),
   ?assertEqual({13,1234567890123}, bin_to_integer(<<"1234567890123">>)),
-  ?assertError(badarg, <<"abc">>),
-  ?assertError(badarg, <<"1e+2">>),
+  ?assertError(badarg, bin_to_integer(<<"abc">>)),
+  ?assertError(badarg, bin_to_integer(<<"1e+2">>)),
   ok.
 
 encode_decode_timestamp_test() ->
