@@ -122,6 +122,11 @@ namespace {
 //------------------------------------------------------------------------------
 struct Field {
   Field();
+  Field(Field&&);
+  Field(Field const&);
+
+  void operator=(Field&& a_rhs);
+  void operator=(Field const& a_rhs);
 
   template <typename DecF>
   Field
@@ -177,11 +182,11 @@ private:
   FieldType                  m_type;
   DataType                   m_dtype;
   mutable ERL_NIF_TERM       m_atom;
-  const int                  m_ch_len;
+  int                        m_ch_len;
   int                        m_max_val_len;    // Max length of codes in 'choices'
   std::vector<FieldChoice>   m_choices;
   const char*                m_len_field;      // Name of the length field for 'NUMINGROUP' and 'DATA' field types
-  const int                  m_len_field_id;   // ID of the length field
+  int                        m_len_field_id;   // ID of the length field
   DecFieldValFun             m_decf;
   TermMap                    m_atom_map;       // Maps atom name Name -> value Code
   NameMap                    m_name_map;
@@ -370,7 +375,7 @@ inline constexpr uint64_t hash_val(const char* s, int len) {
 
 inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool utc=true)
 {
-  int y, mon, d, h, m, s, us;
+  int y, mon, d, h, m, s, us = 0;
 
   auto parse = [p](int offset, int len, int &i)
   {
@@ -384,12 +389,11 @@ inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool
   {
     case 8:  // Format: YYYYMMDD
       res  = parse(0, 4, y) && parse(4, 2, mon) && parse(6, 2, d);
-      h = m = s = us = 0;
+      h = m = s = 0;
       break;
     case 17: // Format: YYYYMMDD-HH:MI:SS
       res  = parse(0, 4, y) && parse(4,  2, mon) && parse(6,  2, d) &&
              parse(9, 2, h) && parse(12, 2, m)   && parse(15, 2, s);
-      us   = 0;
       break;
     case 21: // Read milliseconds: YYYYMMDD-HH:MI:SS.ttt
       res  = parse(0, 4, y) && parse(4,  2, mon) && parse(6,  2, d) &&
@@ -556,6 +560,80 @@ Field::Field
   }
 }
 
+inline Field::Field(Field const& a_rhs)
+  : m_var         (a_rhs.m_var)
+  , m_id          (a_rhs.m_id)
+  , m_name        (a_rhs.m_name)
+  , m_type        (a_rhs.m_type)
+  , m_dtype       (a_rhs.m_dtype)
+  , m_atom        (a_rhs.m_atom)
+  , m_ch_len      (a_rhs.m_ch_len)
+  , m_max_val_len (a_rhs.m_max_val_len)
+  , m_len_field   (a_rhs.m_len_field)
+  , m_len_field_id(a_rhs.m_len_field_id)
+  , m_decf        (a_rhs.m_decf)
+{
+  m_choices  = a_rhs.m_choices;
+  m_atom_map = a_rhs.m_atom_map;
+  m_name_map = a_rhs.m_name_map;
+}
+
+inline Field::Field(Field&& a_rhs)
+  : m_var         (a_rhs.m_var)
+  , m_id          (a_rhs.m_id)
+  , m_name        (a_rhs.m_name)
+  , m_type        (a_rhs.m_type)
+  , m_dtype       (a_rhs.m_dtype)
+  , m_atom        (a_rhs.m_atom)
+  , m_ch_len      (a_rhs.m_ch_len)
+  , m_max_val_len (a_rhs.m_max_val_len)
+  , m_len_field   (a_rhs.m_len_field)
+  , m_len_field_id(a_rhs.m_len_field_id)
+  , m_decf        (a_rhs.m_decf)
+{
+  m_choices.swap(a_rhs.m_choices);
+  m_atom_map.swap(a_rhs.m_atom_map);
+  m_name_map.swap(a_rhs.m_name_map);
+}
+
+inline void Field::operator=(Field&& a_rhs)
+{
+  m_var          = a_rhs.m_var;
+  m_id           = a_rhs.m_id;
+  m_name         = a_rhs.m_name;
+  m_type         = a_rhs.m_type;
+  m_dtype        = a_rhs.m_dtype;
+  m_atom         = a_rhs.m_atom;
+  m_ch_len       = a_rhs.m_ch_len;
+  m_max_val_len  = a_rhs.m_max_val_len;
+  m_len_field    = a_rhs.m_len_field;
+  m_len_field_id = a_rhs.m_len_field_id;
+
+  m_choices.swap(a_rhs.m_choices);
+  m_atom_map.swap(a_rhs.m_atom_map);
+  m_name_map.swap(a_rhs.m_name_map);
+  m_decf.swap(a_rhs.m_decf);
+}
+
+inline void Field::operator=(Field const& a_rhs)
+{
+  m_var          = a_rhs.m_var;
+  m_id           = a_rhs.m_id;
+  m_name         = a_rhs.m_name;
+  m_type         = a_rhs.m_type;
+  m_dtype        = a_rhs.m_dtype;
+  m_atom         = a_rhs.m_atom;
+  m_ch_len       = a_rhs.m_ch_len;
+  m_max_val_len  = a_rhs.m_max_val_len;
+  m_len_field    = a_rhs.m_len_field;
+  m_len_field_id = a_rhs.m_len_field_id;
+  m_decf         = a_rhs.m_decf;
+
+  m_choices      = a_rhs.m_choices;
+  m_atom_map     = a_rhs.m_atom_map;
+  m_name_map     = a_rhs.m_name_map;
+}
+
 inline ERL_NIF_TERM
 Field::get_atom() const
 {
@@ -711,7 +789,7 @@ inline FixVariant
   };
 
   m_variant = get_variant_name("get_fix_variant_name");
-  m_fields  = std::move(get_fields("create_fix_fields"));
+  m_fields  = get_fields("create_fix_fields");
 
   if (m_variant.size() == 0)
     throw std::runtime_error("Empty FIX variant in file: " + so_file);

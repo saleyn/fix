@@ -126,6 +126,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
   FldList      = maps:to_list(FldMap),
   FldMapByName = maps:fold(fun(ID,{Nm,_Tp,_IsGrp,_V},A) -> A#{Nm => ID} end, #{}, FldMap),
   MaxID  = lists:foldl(fun({field, AA, _}, I) -> max(I, get_attr(number, AA)) end, 0, Fields),
+  WID    = length(integer_to_list(MaxID+1)),
   MaxLen = lists:foldl(fun({field, AA, _}, I) -> max(I, length(atom_name(get_attr(name, AA),State))) end, 0, Fields),
   Filenm = add_variant_suffix("fix_fields.cpp", State),
   ok     = write_file(cpp, src, State, Filenm, [], [
@@ -134,8 +135,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
             "std::vector<Field> make_all_fields(FixVariant* fvar)\n"
             "{\n"
             "  assert(fvar);\n"
-            "  auto vec = std::vector<Field>();\n"
-            "  vec.reserve(", integer_to_list(MaxID+1), ");\n",
+            "  auto vec = std::vector<Field>(", integer_to_list(MaxID+1), ", Field{});\n",
             lists:map(fun(I) ->
               % ID::integer(), FieldName::quoted_string(), FieldType::string(),
               % FieldType::atom(), Vals::list(), LenFldName::quoted_string()
@@ -165,76 +165,77 @@ generate_fields(Fields, FldMap, #state{} = State) ->
                   error ->
                     {0, "nullptr", "UNDEFINED", undefined, [], "", 0}
                 end,
-              LID = integer_to_list(ID),
-              LE  = iif(Vals==[], 0, lists:max([length(CC) || {CC,  _} <- Vals])),
-              LEn = length(integer_to_list(LE)),
-              LL  = length(Vals),
-              ME  = LE+2,
-              MD  = iif(Vals==[], 0, lists:max([length(atom_name(caml_case(DD),State)) || {_,DD} <- Vals])+2),
-              NVals = lists:zip(lists:seq(0, LL-1), Vals),
-              Doc   = [" //--- Tag# ", integer_to_list(I), iif(ID==0, "", " "++q(Name)), "\n"],
-              [
-                "  vec.emplace_back(Field{",
-                if ID==0 ->
-                  ["});", Doc];
+
+              FirstZero = get(first_zero),
+
+              if ID==0 ->
+                (FirstZero == undefined) andalso put(first_zero, I),
+                [];
+              true ->
+                erase(first_zero),
+                LID = integer_to_list(ID),
+                LE  = iif(Vals==[], 0, lists:max([length(CC) || {CC,  _} <- Vals])),
+                LEn = length(integer_to_list(LE)),
+                LL  = length(Vals),
+                ME  = LE+2,
+                MD  = iif(Vals==[], 0, lists:max([length(atom_name(caml_case(DD),State)) || {_,DD} <- Vals])+2),
+                NVals = lists:zip(lists:seq(0, LL-1), Vals),
+                [
+                "  vec[", spad(I, WID), "] = Field{      //--- Tag# ", integer_to_list(I), " ", q(Name), "\n",
+                "    fvar,\n"
+                "    ", LID, ",\n"
+                "    ", q(Name), ",\n"
+                "    FieldType::", Type, ",\n"
+                "    ", dtype(RawType, MapDT), ",\n"
+                "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
+                lists:map(fun({II,{CC,DD}}) ->
+                  io_lib:format(
+                "      {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
+                                [qpad(CC,ME), qpad(atom_name(caml_case(DD),State), MD), II])
+                end, NVals),
+                iif(Vals==[], "", "    }},\n"),
+                "    ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
+                "    ", integer_to_list(LenFldID), ",\n",
+                if Vals==[] ->
+                  "    nullptr";
                 true ->
-                  [
-                  "   ", Doc,
-                  "    fvar,\n"
-                  "    ", LID, ",\n"
-                  "    ", iif(ID==0, "nullptr", q(Name)), ",\n"
-                  "    FieldType::", Type, ",\n"
-                  "    ", dtype(RawType, MapDT), ",\n"
-                  "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
-                  lists:map(fun({II,{CC,DD}}) ->
-                    io_lib:format(
-                  "      {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
-                                  [qpad(CC,ME), qpad(atom_name(caml_case(DD),State), MD), II])
-                  end, NVals),
-                  iif(Vals==[], "", "    }},\n"),
-                  "    ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
-                  "    ", integer_to_list(LenFldID), ",\n",
-                  if Vals==[] ->
-                    "    nullptr";
+                  "    [](const Field& f, ErlNifEnv* env, const char* code, int len) {"
+                end,
+                if
+                  Vals==[] ->
+                    "\n";
+                  LE == 1 ->
+                    ["\n"
+                     "      if (!len) [[unlikely]] return am_undefined;\n"
+                     "      switch (code[0]) {\n",
+                     [io_lib:format("        case '~s': return f.value_atom(~s); // ~s\n",
+                                    [CC,spad(integer_to_list(II),LEn),DD])
+                      || {II,{CC,DD}} <- NVals],
+                     "        default: return am_undefined;\n"
+                     "      }\n"
+                    ];
+                  LE > 8 ->
+                    ["\n"
+                     "      auto   fc = f.value(std::string_view(code, len));\n",
+                     "      return fc ? fc->get_atom(env) : am_undefined;\n"
+                    ];
                   true ->
-                    "    [](const Field& f, ErlNifEnv* env, const char* code, int len) {"
-                  end,
-                  if
-                    Vals==[] ->
-                      "\n";
-                    LE == 1 ->
-                      ["\n"
-                       "      if (!len) [[unlikely]] return am_undefined;\n"
-                       "      switch (code[0]) {\n",
-                       [io_lib:format("        case '~s': return f.value_atom(~s); // ~s\n",
-                                      [CC,spad(integer_to_list(II),LEn),DD])
-                        || {II,{CC,DD}} <- NVals],
-                       "        default: return am_undefined;\n"
-                       "      }\n"
-                      ];
-                    LE > 8 ->
-                      ["\n"
-                       "      auto   fc = f.value(std::string_view(code, len));\n",
-                       "      return fc ? fc->get_atom(env) : am_undefined;\n"
-                      ];
-                    true ->
-                      MML = integer_to_list(lists:max([length(to_char_str(CC)) || {CC,_} <- Vals])),
-                      NW  = integer_to_list(length(integer_to_list(length(Vals)))),
-                      ["\n"
-                       "      auto hash = len == 1 ? uint64_t(code[0]) : hash_val(code, len);\n"
-                       "      switch (hash) {\n",
-                       [io_lib:format("        case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
-                          [iif(length(CC)==1, qname(CC), to_char_str(CC)),II,caml_case(DD)])
-                        || {II,{CC,DD}} <- NVals],
-                       "        default: return am_undefined;\n"
-                       "      }\n"
-                      ]
-                  end,
-                  iif(Vals==[], "", "    },\n"),
-                  "  });\n"
-                  ]
-                end
-              ]
+                    MML = integer_to_list(lists:max([length(to_char_str(CC)) || {CC,_} <- Vals])),
+                    NW  = integer_to_list(length(integer_to_list(length(Vals)))),
+                    ["\n"
+                     "      auto hash = len == 1 ? uint64_t(code[0]) : hash_val(code, len);\n"
+                     "      switch (hash) {\n",
+                     [io_lib:format("        case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
+                        [iif(length(CC)==1, qname(CC), to_char_str(CC)),II,caml_case(DD)])
+                      || {II,{CC,DD}} <- NVals],
+                     "        default: return am_undefined;\n"
+                     "      }\n"
+                    ]
+                end,
+                iif(Vals==[], "", "    }\n"),
+                "  };\n"
+                ]
+              end
             end, lists:seq(0, MaxID)),
             "\n"
             "  return vec;\n"
@@ -972,8 +973,9 @@ q(S) when is_atom(S) -> q(atom_to_list(S)).
 sq(S) when is_list(S) -> "'"++S++"'";
 sq(S) when is_atom(S) -> sq(atom_to_list(S)).
 
-spad(S, I) when is_atom(S) -> string:pad(atom_to_list(S), I);
-spad(S, I) when is_list(S) -> string:pad(S, I).
+spad(S, I) when is_atom(S)    -> string:pad(atom_to_list(S), I);
+spad(S, I) when is_list(S)    -> string:pad(S, I);
+spad(S, I) when is_integer(S) -> string:pad(integer_to_list(S), I, leading).
 
 qpad (S, I) -> string:pad(q(S),  I).
 sqpad(S, I) -> string:pad(sq(S), I).

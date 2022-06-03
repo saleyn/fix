@@ -21,6 +21,7 @@
 -export([pathftime/2, pathftime/3]).
 
 -include("fix.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -type decoded_message() :: list({atom(), integer() | binary() | atom()}).
 -export_type([decoded_message/0]).
@@ -66,7 +67,8 @@ init_nif() ->
       end,
     case filelib:wildcard(Msk) of
       [] ->
-        throw("No shared object files found matching name: ~s", [Msk]);
+        logger:warning("No shared object files found matching name: ~s", [Msk]),
+        S;
       Names ->
         Names ++ S
     end
