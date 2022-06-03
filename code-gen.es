@@ -39,7 +39,7 @@
   cpp_path = "c_src",
   erl_path = "src",
   inc_path = "include",
-  version  = "FIX.4.4",
+  version,
   variants = [],      %% FIX Variant Name
   variant  = "",      %% FIX Variant Name (required argument)
   var_pfx  = "",      %% FIX variant prefix in lower case
@@ -67,10 +67,15 @@ main(Args) ->
   filelib:is_regular(Schema) orelse abort("Schema file " ++ Schema ++ " not found!"),
 
   lists:foreach(fun(Variant) ->
-    State = update(Variant, State0),
+    State1 = update(Variant, State0),
 
-    {_FixVsn, Header, _Trailer, Messages, AllMsgGrps, Fields, FldMap} =
-      read_file(State),
+    {FixVsn, Header, _Trailer, Messages, AllMsgGrps, Fields, FldMap} =
+      read_file(State1),
+
+    State = case State1#state.version of
+              undefined -> State1#state{version = FixVsn};
+              _         -> State1
+            end,
 
     generate_fields  (Fields,  FldMap,   State),
     generate_parser  (Header,  Messages, AllMsgGrps, FldMap, State),
@@ -711,14 +716,13 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
   {fix,AA,L} = xmltree:file(Xml, Schema),
   MajorVsn   = get_attr(major, AA),
   MinorVsn   = get_attr(minor, AA),
-  FixVsn     = MajorVsn*10 + MinorVsn,
+  FixVsn     = str(io_lib:format("FIX.~w.~w", [MajorVsn, MinorVsn])),
   Components = [C || {components, _, I} <- L, C <- I],
   [Header]   = [{header,  "", admin, expand_components(I, Components, header)}
                 || {header,     _, I} <- L],
   [Trailer]  = [{trailer, "", admin, expand_components(I, Components, trailer)}
                 || {trailer,    _, I} <- L],
   Fields     = [F || {fields,   _, I} <- L, F <- I],
-  %io:format("Fields:\n~p\n", [Fields]),
   Messages   = [{M, T, C, expand_components(I, Components, M)}
                 || {messages,   _, J} <- L,
                    {message,    A, I} <- J,
@@ -732,8 +736,6 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
                end,
   AllMsgs    = [Header, Trailer | Messages],
   UsedFields = sets:from_list(lists:foldl(Fun, [], AllMsgs)),
-
-  %io:format("AllMsgs: ~p\n", [AllMsgs]),
 
   % Make sure that the names of messages are consistent with what's defined
   % in the field#35 (i.e. description of enum values of this field must match
@@ -766,7 +768,8 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
   Name2ID = fun(N) -> maps:get(N, NameMap) end,
   AllGrps = get_all_groups([Header | Messages], Name2ID, []),
 
-  %% Update group tags
+  %% Update group tags. In contrast to FIX4.4, FIX4.2 does not label them as
+  %% the 'NUMINGROUP' type but instead defines them as 'INT'.
   FldMap2 = lists:foldl(fun({_, F, _}, M) ->
     {ok, ID} = maps:find(F, NameMap),
     %% E.g. {'NoAllocs','INT',field,[]}
@@ -774,7 +777,7 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
     M#{ID => {Name1, 'NUMINGROUP', group, Vals1}}
   end, FldMap, AllGrps),
 
-  %io:format("AllGrps: ~p\n", [AllGrps]),
+  %io:format("AllGrps: ~p\n",   [AllGrps]),
   %io:format("MsgTypes:\n~p\n", [MsgTypes]),
   {FixVsn, Header, Trailer, Messages, AllGrps, Fields2, FldMap2}.
 
