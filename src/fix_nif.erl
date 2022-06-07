@@ -41,7 +41,7 @@ init_nif() ->
   Files = lists:foldl(fun(V, S) ->
     Msk =
       if is_atom(V) ->
-        case lists:member(V, Apps) of
+        case lists:keymember(V, 1, Apps) of
           true ->
             case code:priv_dir(V) of
               {error, _} ->
@@ -50,7 +50,14 @@ init_nif() ->
                 filename:join(filename:absname(Dir), "fix_fields*.so")
             end;
           false ->
-            throw("Unknown application name: ~w", [V])
+            case code:priv_dir(fix) of
+              FixDir when is_list(FixDir) ->
+                [_,_|Dir] = lists:reverse(string:split(FixDir, "/", all)),
+                MM = filename:join(atom_to_list(V), "fix_fields*.so"),
+                filename:join(string:join(lists:reverse(Dir), "/"), MM);
+              {error, _} ->
+                throw("Unknown application name: ~w", [V])
+            end
         end;
       is_list(V); is_binary(V) ->
         IsDir   = filelib:is_dir(V),
@@ -66,6 +73,7 @@ init_nif() ->
       true ->
         throw("Invalid argument in fix.fix_variants: ~p", [V])
       end,
+    io:format("Checking: ~s\n", [Msk]),
     case filelib:wildcard(Msk) of
       [] when V /= Priv ->
         logger:warning("No shared object files found matching name: ~s", [Msk]),
