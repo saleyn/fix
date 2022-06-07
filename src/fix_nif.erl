@@ -73,7 +73,6 @@ init_nif() ->
       true ->
         throw("Invalid argument in fix.fix_variants: ~p", [V])
       end,
-    io:format("Checking: ~s\n", [Msk]),
     case filelib:wildcard(Msk) of
       [] when V /= Priv ->
         logger:warning("No shared object files found matching name: ~s", [Msk]),
