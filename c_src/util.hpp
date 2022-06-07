@@ -36,6 +36,7 @@ static ERL_NIF_TERM am_ok;
 static ERL_NIF_TERM am_error;
 static ERL_NIF_TERM am_more;
 static ERL_NIF_TERM am_enomem;
+static ERL_NIF_TERM am_group;
 
 static const char SOH = 1;
 
@@ -125,6 +126,12 @@ struct Field {
   Field(Field&&);
   Field(Field const&);
 
+  enum class WriteOp {
+    Success,
+    Error,
+    NoSpace
+  };
+
   void operator=(Field&& a_rhs);
   void operator=(Field const& a_rhs);
 
@@ -141,6 +148,8 @@ struct Field {
     const int                   len_field_id,   // ID of the length field
     DecF                        dec_fun
   );
+
+  int                     debug()        const;
 
   int                     id()           const { return m_id;           }
   std::string_view const& name_str()     const { return m_name;         }
@@ -172,6 +181,13 @@ struct Field {
   // Find a value of the field as a term in the map identified by the atom value
   // and return a copy suitable for returning from a NIF.
   ERL_NIF_TERM encode(ErlNifEnv* env, ERL_NIF_TERM val);
+
+  // Find a value of the field as a term in the map identified by the atom value
+  // or if the val is binary take as is, and create a binary
+  // `<<Tag/binary, 1, Value/binary, 1>>`
+  ERL_NIF_TERM encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
+                               ERL_NIF_TERM tag, ERL_NIF_TERM val);
+
 private:
   using TermMap = std::unordered_map<ERL_NIF_TERM, ERL_NIF_TERM>;
   using NameMap = std::unordered_map<std::string_view, const FieldChoice*>;
@@ -234,13 +250,16 @@ private:
 // Manages FIX variant fields metadata and shared binaries: <<"1">>,<<"2">>, ...
 //------------------------------------------------------------------------------
 struct FixVariant {
-  using BinsArray      = std::vector<ERL_NIF_TERM>;
-  using FieldValsArray = std::vector<std::vector<FieldChoice>>;
-
+  using BinsArray        = std::vector<ERL_NIF_TERM>;
+  using FieldValsArray   = std::vector<std::vector<FieldChoice>>;
+  using FieldAndTagConst = std::pair<Field const*, ERL_NIF_TERM>;
+  using FieldAndTag      = std::pair<Field*,       ERL_NIF_TERM>;
+ 
   FixVariant(Persistent* pers, const std::string& path);
 
   ~FixVariant();
 
+  int                 debug()   const { return m_pers->debug(); }
   std::string const&  variant() const { return m_variant;       }
   std::string const&  so_path() const { return m_so_path;       }
   ErlNifEnv*          env()           { return m_pers->env();   }
@@ -249,6 +268,23 @@ struct FixVariant {
 
   Field const*        field(unsigned idx) const;
   Field*              field(unsigned idx);
+
+  Field const*        field(ErlNifEnv*, ERL_NIF_TERM tag) const;
+  Field*              field(ErlNifEnv*, ERL_NIF_TERM tag);
+
+  // This function returns a pointer to a Field, and a binary tag 
+  // value. Note that the binary is for internal use within the NIF
+  // driver, and if returned back to Erlang, need to be wrapped by
+  // a enif_make_copy() call!
+  FieldAndTagConst    field_with_tag(unsigned idx) const;
+  FieldAndTag         field_with_tag(unsigned idx);
+
+  // This function returns a pointer to a Field, and a binary tag 
+  // value. Note that the binary is for internal use within the NIF
+  // driver, and if returned back to Erlang, need to be wrapped by
+  // a enif_make_copy() call!
+  FieldAndTagConst    field_with_tag(ErlNifEnv*, ERL_NIF_TERM tag) const;
+  FieldAndTag         field_with_tag(ErlNifEnv*, ERL_NIF_TERM tag);
 
   int                 field_count() const { return m_fields.size(); }
 
@@ -261,17 +297,28 @@ struct FixVariant {
     return enif_make_copy(env, m_bins[idx]);
   }
 
-  int find_tag_by_name(std::string_view&& name)
+  int find_tag_by_name(std::string_view&& name) const
   {
     auto   it  = m_name_to_tag_map.find(name);
     return it == m_name_to_tag_map.end() ? 0 : it->second;
   }
 
-  int find_tag_by_atom(ERL_NIF_TERM name)
+  int find_tag_by_atom(ERL_NIF_TERM name) const
   {
     auto   it  = m_atom_to_tag_map.find(name);
     return it == m_atom_to_tag_map.end() ? 0 : it->second;
   }
+
+  // Get the numeric value of the FIX field from an integer/atom/binary representation.
+  // "is_name" is 0, if val is integer or binary encoded integer
+  //              1, if val is atom or binary string
+  //             -1  either integer or atom
+  // Convert:
+  //   is_name <= 0: (10)             -> 10
+  //   is_name <= 0: (<<"10">>)       -> 10
+  //   is_name != 0: ('CheckSum')     -> 10
+  //   is_name != 0: (<<"CheckSum">>) -> 10
+  bool field_code(ErlNifEnv* env, ERL_NIF_TERM fld, int& code, int is_name) const;
 
 private:
   Persistent*           m_pers;
@@ -330,6 +377,13 @@ std::unique_ptr<ERL_NIF_TERM, void(*)(ERL_NIF_TERM*)>
 inline unique_term_ptr(void* ptr)
 {
   return {(ERL_NIF_TERM*)ptr, [](ERL_NIF_TERM* p){ if (p) free((void*)p); }};
+}
+
+// A unique smart pointer that releases ErlNifBinary when it goes out of scope
+std::unique_ptr<ErlNifBinary, void(*)(ErlNifBinary*)>
+inline binary_guard(ErlNifBinary& bin)
+{
+  return {&bin, [](ErlNifBinary* p){ if (p) enif_release_binary(p); }};
 }
 
 namespace {
@@ -426,9 +480,11 @@ inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool
   return epoch * 1'000'000 + us;
 }
 
-inline ERL_NIF_TERM
-encode_timestamp(ErlNifEnv* env, uint64_t usecs, bool msec=false, bool utc=true)
+template <int N, typename Ch = char>
+int encode_timestamp(Ch (&buf)[N], uint64_t usecs, bool msec=false, bool utc=true)
 {
+  static_assert(N > 24);
+
   auto secs = usecs / 1'000'000;
   int  us   = int(usecs - secs * 1'000'000);
 
@@ -436,24 +492,33 @@ encode_timestamp(ErlNifEnv* env, uint64_t usecs, bool msec=false, bool utc=true)
   auto res = utc ? gmtime_r   ((const time_t*)&secs, &tm)
                  : localtime_r((const time_t*)&secs, &tm);
   if (res == nullptr)
-    return enif_make_badarg(env);
+    return 0;
 
   if (msec) us /= 1000;
 
+  return snprintf((char*)buf, N, msec ? "%04d%02d%02d-%02d:%02d:%02d.%03d"
+                                      : "%04d%02d%02d-%02d:%02d:%02d.%06d",
+                  tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, us);
+}
+
+inline ERL_NIF_TERM
+encode_timestamp(ErlNifEnv* env, uint64_t usecs, bool msec=false, bool utc=true)
+{
   char buf[64];
-  snprintf(buf, sizeof(buf), msec ? "%04d%02d%02d-%02d:%02d:%02d.%03d"
-                                  : "%04d%02d%02d-%02d:%02d:%02d.%06d",
-          tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
-          tm.tm_hour, tm.tm_min, tm.tm_sec, us);
+
+  auto n = encode_timestamp(buf, usecs, msec, utc);
+
+  if (n == 0) [[unlikely]]
+    return enif_make_badarg(env);
 
   ERL_NIF_TERM ret;
 
-  auto size = msec ? 21 : 24;
-  auto data = enif_make_new_binary(env, size, &ret);
+  auto data = enif_make_new_binary(env, n, &ret);
   if (!data)
     return enif_raise_exception(env, am_enomem);
 
-  memcpy(data, buf, size);
+  memcpy(data, buf, n);
 
   return ret;
 }
@@ -555,7 +620,7 @@ Field::Field
   for(auto& fc : m_choices) {
     m_max_val_len = std::max(strlen(fc.value), size_t(m_max_val_len));
     m_atom_map.emplace(enif_make_atom(var->env(), fc.descr),
-                       create_binary(var->env(), fc.value));
+                       create_binary(var->env(),  fc.value));
     m_name_map.emplace(std::string_view(fc.value, strlen(fc.value)), &fc);
   }
 }
@@ -634,6 +699,9 @@ inline void Field::operator=(Field const& a_rhs)
   m_name_map     = a_rhs.m_name_map;
 }
 
+inline int
+Field::debug() const { return m_var->debug(); }
+
 inline ERL_NIF_TERM
 Field::get_atom() const
 {
@@ -685,6 +753,132 @@ Field::encode(ErlNifEnv* env, ERL_NIF_TERM val)
   return enif_make_copy(env, it->second);
 }
 
+// Return a binary <<Tag/binary, $=, Value/binary, 1>>
+inline ERL_NIF_TERM 
+Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
+                       ERL_NIF_TERM tag, ERL_NIF_TERM val)
+{
+  unsigned char tmp[64];
+  ErlNifBinary  btag, bval{};
+  unsigned      grp_len = 0;
+
+  if (!enif_inspect_binary(env, tag, &btag)) [[unlikely]]
+    return am_error;
+
+  if (m_dtype == DataType::GROUP) {
+    if (enif_is_empty_list(env, val))
+      grp_len = 0;
+    else if (!enif_get_list_length(env, val, &grp_len))
+      return am_error;
+
+    bval.data = tmp;
+    bval.size = snprintf((char*)tmp, sizeof(tmp), "%u", grp_len);
+  } else {
+    if (enif_is_atom(env, val)) {
+      auto it = m_atom_map.find(val);
+      if (it == m_atom_map.end()) [[unlikely]]
+        return am_error;
+      val = it->second;
+    }
+    long n;
+    if (enif_get_long(env, val, &n)) {
+      if (m_dtype == DataType::DATETIME)
+        bval.size  = encode_timestamp(tmp, n);
+      else
+        bval.size  = snprintf((char*)tmp, sizeof(tmp), "%ld", n);
+      bval.data = tmp;
+    }
+    else if (!enif_inspect_binary(env, val, &bval))
+      return am_error;
+  }
+  assert(bval.data);
+  auto   sz     = btag.size + bval.size + 2 /* 2xSOH */;
+  size_t needed = sz;
+  unsigned char*  p;
+  
+  if (!offset) {
+    assert(res.data == nullptr);
+    if (!enif_alloc_binary(needed, &res))
+      return am_enomem;
+    p = res.data;
+  } else {
+    needed += offset;
+    assert(res.data);
+    if (needed > res.size && !enif_realloc_binary(&res, needed+256))
+      return am_enomem;
+    p = res.data + offset;
+  }
+
+  memcpy(p, btag.data, btag.size);
+  p   += btag.size;
+  *p++ = '=';
+  memcpy(p, bval.data, bval.size);
+  p   += bval.size;
+  *p++ = SOH;
+
+  offset += sz;
+
+  // Serialize groups
+  if (grp_len > 0) {
+    ERL_NIF_TERM head,  list  = val;
+    const ERL_NIF_TERM* kv;
+    int                 arity;
+    ERL_NIF_TERM        delim = 0;
+
+    while (enif_get_list_cell(env, list, &head, &list)) {
+      // Expecting #group{name=..., fields=[H|T]}, i.e. `{group, Name, Fields}`
+      if (!enif_get_tuple(env, head, &arity, &kv) || arity != 3 ||
+          !enif_is_identical(am_group, kv[0])) [[unlikely]]
+        return am_error;
+
+      // Encode fields inside the group
+      if (!enif_is_atom(env, kv[1]) || !enif_is_list(env, kv[2])) [[unlikely]]
+        return am_error;
+
+      int i=0;
+      ERL_NIF_TERM grp_name = kv[1], h, l = kv[2];
+      while (enif_get_list_cell(env, l, &h, &l)) {
+        const ERL_NIF_TERM* fv;
+        if (!enif_get_tuple(env, h, &arity, &fv) || arity != 2)
+          return am_error;
+
+        auto fldname = fv[0];
+        auto fldval  = fv[1];
+
+        auto [field, tagnum_bin] = m_var->field_with_tag(env, fldname);
+
+        if (!field) [[unlikely]]
+          return am_error;
+
+        if (i++ == 0) {
+          if (delim == 0)
+            delim = fldname;
+          else if (!enif_is_identical(delim, fldname)) {
+            char group[128], expect[128], got[128], buf[256];
+            if (!enif_get_atom(env, grp_name, group,  sizeof(group),  ERL_NIF_LATIN1) ||
+                !enif_get_atom(env, delim,    expect, sizeof(expect), ERL_NIF_LATIN1) ||
+                !enif_get_atom(env, fldname,  got,    sizeof(got),    ERL_NIF_LATIN1))
+              return am_error;
+
+            auto n = snprintf(buf, sizeof(buf),
+                              "invalid first tag for group %s: expected=%s, got=%s",
+                              group, expect, got);
+            ERL_NIF_TERM res;
+            auto pbuf = (char*)enif_make_new_binary(env, n, &res);
+            strncpy(pbuf, buf, n);
+            return res;
+          }
+        }
+        auto rres = field->encode_with_tag(env, offset, res, tagnum_bin, fldval);
+        if (rres != am_ok)
+          return rres;
+      }
+    }
+  }
+
+  return am_ok;
+}
+
 //------------------------------------------------------------------------------
 inline Persistent::Persistent(std::vector<std::string> const& so_files, int debug)
   : m_env(enif_alloc_env())
@@ -712,6 +906,7 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files, int debu
   am_error     = make_atom("error");
   am_more      = make_atom("more");
   am_enomem    = make_atom("enomem");
+  am_group     = make_atom("group");
 }
 
 inline Persistent::~Persistent()
@@ -801,9 +996,9 @@ inline FixVariant
       m_variant.c_str(), m_fields.size());
 
   m_bins.resize(0);
-  m_bins.reserve(m_fields.size());
+  m_bins.reserve(m_fields.size()+1);
 
-  for (int i=1; i < field_count(); ++i)
+  for (int i=0; i < field_count(); ++i)
   {
     // Initialize m_bins[i] with integer_to_binary(i)
     char s[16];
@@ -830,6 +1025,61 @@ inline FixVariant::~FixVariant()
     dlclose(m_so_handle);
 }
 
+bool
+FixVariant::field_code(ErlNifEnv* env, ERL_NIF_TERM fld, int& code, int is_name) const
+{
+  ErlNifBinary bin;
+
+  if (enif_inspect_binary(env, fld, &bin)) {
+    if (is_name > 0)
+      code = find_tag_by_name(std::string_view((const char*)bin.data, bin.size));
+    else if (!str_to_int((char*)bin.data, (char*)bin.data+bin.size, code)) [[unlikely]]
+      code = is_name == 0 ? 0
+           : find_tag_by_name(std::string_view((const char*)bin.data, bin.size));
+  }
+  else if (is_name != 0)
+    code = enif_is_atom(env, fld) ? find_tag_by_atom(fld)
+         : enif_get_int(env, fld, &code) ? code : 0;
+  else if (is_name <= 0 && !enif_get_int(env, fld, &code)) [[unlikely]]
+    code = 0;
+
+  return code > 0 && code < field_count();
+}
+
+inline Field const*
+FixVariant::field(ErlNifEnv* env, ERL_NIF_TERM tag) const
+{
+  int code;
+
+  if (!field_code(env, tag, code, 1)) [[unlikely]]
+    return nullptr;
+
+  auto res = field(code);
+
+  // The following is guaranteed by arg_code() call:
+  assert(code > 0 && code < field_count());
+  assert(res); // This is guaranteed by the check above
+
+  return res;
+}
+
+inline Field*
+FixVariant::field(ErlNifEnv* env, ERL_NIF_TERM tag)
+{
+  int code;
+
+  if (!field_code(env, tag, code, 1)) [[unlikely]]
+    return nullptr;
+
+  auto res = field(code);
+
+  // The following is guaranteed by arg_code() call:
+  assert(code > 0 && code < field_count());
+  assert(res); // This is guaranteed by the check above
+
+  return res;
+}
+
 inline Field const*
 FixVariant::field(unsigned idx) const
 {
@@ -840,6 +1090,40 @@ inline Field*
 FixVariant::field(unsigned idx)
 {
   return idx < m_fields.size() ? &m_fields[idx] : nullptr;
+}
+
+inline FixVariant::FieldAndTagConst
+FixVariant::field_with_tag(unsigned idx) const
+{
+  if (idx >= m_fields.size()) [[unlikely]]
+    return std::make_pair((Field const*)nullptr, ERL_NIF_TERM(0));
+  return std::make_pair(&m_fields[idx], m_bins[idx]);
+}
+
+inline FixVariant::FieldAndTag
+FixVariant::field_with_tag(unsigned idx)
+{
+  if (idx >= m_fields.size()) [[unlikely]]
+    return std::make_pair((Field*)nullptr, ERL_NIF_TERM(0));
+  return std::make_pair(&m_fields[idx], m_bins[idx]);
+}
+
+inline FixVariant::FieldAndTagConst
+FixVariant::field_with_tag(ErlNifEnv* env, ERL_NIF_TERM tag) const
+{
+  auto  fld = field(env, tag);
+  if  (!fld)  return std::make_pair(nullptr, 0);
+  assert(fld->id() > 0 && fld->id() < field_count());
+  return std::make_pair(fld, m_bins[fld->id()]);
+}
+
+inline FixVariant::FieldAndTag
+FixVariant::field_with_tag(ErlNifEnv* env, ERL_NIF_TERM tag)
+{
+  auto  fld = field(env, tag);
+  if  (!fld)  return std::make_pair(nullptr, 0);
+  assert(fld->id() > 0 && fld->id() < field_count());
+  return std::make_pair(fld, m_bins[fld->id()]);
 }
 
 //------------------------------------------------------------------------------
@@ -909,12 +1193,12 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
   auto pcsum = msg_end-7;
 
   static const char s_checksum[] = {'1', '0', '='};
-  if (memcmp(pcsum, s_checksum, sizeof(s_checksum)) != 0)
+  if (memcmp(pcsum, s_checksum, sizeof(s_checksum)) != 0) [[unlikely]]
     return make_error(env, "invalid_msg_length", msg_len, 9);
 
   msg_len = msg_end - begin;  // Complete length of current FIX message
 
-  if (*(msg_end-1) != soh)
+  if (*(msg_end-1) != soh) [[unlikely]]
     return make_error(env, "invalid_msg_terminator", msg_len, 0);
 
   auto  state = ParserState(ParserState::CODE);
@@ -929,6 +1213,9 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
   auto tag_begin   = ptr;
   auto tag_end     = ptr;
   ERL_NIF_TERM tag = 0;
+
+  if (!reply) [[unlikely]]
+    return enif_raise_exception(env, am_enomem);
 
   // Add {Tag::atom(),  Val::any(), TagCode::integer(),
   //         {ValOffset::integer(), ValLen ::integer()}}

@@ -32,6 +32,7 @@ static ERL_NIF_TERM am_ms;
 static ERL_NIF_TERM am_binary;
 static ERL_NIF_TERM am_offset;
 static ERL_NIF_TERM am_delim;
+static ERL_NIF_TERM am_badarg;
 static ERL_NIF_TERM am_badenv;
 static ERL_NIF_TERM am_badvariant;
 static ERL_NIF_TERM am_full;
@@ -90,19 +91,6 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   return do_split(var, env, begin, end, ret_binary, full);
 }
 
-// "CheckSum" -> 10
-static int name_to_tag(FixVariant* var, const char* p, size_t sz)
-{
-  return var->find_tag_by_name(std::string_view(p, sz));
-}
-
-// 'CheckSum' -> 10
-static int atom_to_tag(FixVariant* var, ErlNifEnv* env, ERL_NIF_TERM am)
-{
-  assert(enif_is_atom(env, am));
-  return var->find_tag_by_atom(am);
-}
-
 // "is_name" is 0, if val is integer or binary encoded integer
 //              1, if val is atom or binary string
 //             -1  either integer or atom
@@ -114,22 +102,7 @@ static int atom_to_tag(FixVariant* var, ErlNifEnv* env, ERL_NIF_TERM am)
 static bool
 arg_code(FixVariant* var, ErlNifEnv* env, ERL_NIF_TERM val, int& code, int is_name = 0)
 {
-  ErlNifBinary bin;
-
-  assert(var);
-
-  if (enif_inspect_binary(env, val, &bin)) {
-    if (is_name > 0)
-      code = name_to_tag(var, (const char*)bin.data, bin.size);
-    else if (!str_to_int((char*)bin.data, (char*)bin.data+bin.size, code)) [[unlikely]]
-      code = is_name == 0 ? 0 : name_to_tag(var, (const char*)bin.data, bin.size);
-  }
-  else if (is_name != 0)
-    code = enif_is_atom(env, val) ? atom_to_tag(var, env, val) : 0;
-  else if (is_name <= 0 && !enif_get_int(env, val, &code)) [[unlikely]]
-    code = 0;
-
-  return code > 0 && code < var->field_count();
+  return var->field_code(env, val, code, is_name);
 }
 
 // Convert (int()|binary()) -> atom():
@@ -224,28 +197,136 @@ encode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return enif_raise_exception(env, am_badenv);
 
   FixVariant* var;
-  int         code;
 
-  if (argc != 3
-           || !pers->get(argv[0], var)
-           || !arg_code(var, env, argv[1], code, 1)) [[unlikely]]
+  if (argc != 3 || !pers->get(argv[0], var)) [[unlikely]]
     return enif_make_badarg(env);
 
-  auto field = var->field(code);
+  auto tag = argv[1];
+  auto val = argv[2];
+  long n;
+  char sbuf[128];
 
-  // The following is guaranteed by arg_code() call:
-  assert(code > 0 && code < var->field_count());
+  auto [field, numtag] = var->field_with_tag(env, tag);
+  if (!field)
+    return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
 
-  assert(field);  // This is guaranteed by the check above
-
-  if (enif_is_atom(env, argv[2])) {
+  if (enif_is_atom(env, val)) {
     if (!field->has_values()) [[unlikely]]
-      return enif_make_badarg(env);
-    return field->encode(env, argv[2]); // This creates a copy of the cached binary
-  } else if (enif_is_binary(env, argv[2])) [[likely]]
-    return argv[2];
+      return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
+    return field->encode(env, val); // This creates a copy of the cached binary
+  } else if (enif_is_binary(env, val)) {
+    return val;
+  } else if (enif_get_long(env, val, &n)) {
+    ERL_NIF_TERM bin;
+    char buf[32];
+    int  len = (field->dtype() == DataType::DATETIME)
+             ? encode_timestamp(buf, n)
+             : snprintf(buf, sizeof(buf), "%ld", n);
+    if (len == 0) [[unlikely]]
+      return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
+    auto p   = (char*)enif_make_new_binary(env, len, &bin);
+    if (!p) [[unlikely]]
+      return enif_raise_exception(env, am_enomem);
+    memcpy(p, buf, len);
+    return bin;
+  } else if (enif_get_string(env, val, sbuf, sizeof(sbuf), ERL_NIF_LATIN1)) {
+    return val;
+  }
 
-  return enif_make_badarg(env);
+  return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
+}
+
+static ERL_NIF_TERM
+encode_field_tagvalue_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  FixVariant* var;
+
+  if (argc != 3 || !pers->get(argv[0], var)) [[unlikely]]
+    return enif_make_badarg(env);
+
+  auto tag = argv[1];
+  auto val = argv[2];
+
+  auto [field, numtag] = var->field_with_tag(env, tag);
+  if (!field)
+    return enif_make_badarg(env);
+
+  int offset = 0;
+  ErlNifBinary output{};
+  auto guard = binary_guard(output);
+
+  auto res = field->encode_with_tag(env, offset, output, numtag, val);
+
+  if  (res != am_ok) [[unlikely]]
+    return res == am_error
+         ? enif_raise_exception(env, enif_make_tuple2(env, res, tag))
+         : enif_raise_exception(env, res);
+
+  if (offset < int(output.size) && !enif_realloc_binary(&output, offset))
+    return enif_raise_exception(env, am_enomem);
+
+  guard.release();
+
+  return enif_make_binary(env, &output);
+}
+
+static ERL_NIF_TERM
+encode_fields_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  FixVariant* var;
+
+  if (argc != 2 || !pers->get(argv[0], var) ||
+      !(enif_is_list(env, argv[1]) || enif_is_empty_list(env, argv[1]))) [[unlikely]]
+    return enif_make_badarg(env);
+
+  int   offset = 0;
+  ErlNifBinary output{};
+
+  if (!enif_alloc_binary(256, &output))
+    return enif_raise_exception(env, am_enomem);
+
+  // This releases binary memory when it goes out of scope.
+  // When there is an error inside the `while` loop below, the allocated
+  // binary will get automatically released. However after the loop, we
+  // explicitely release the guard, since we need the binary to be returned
+  // to the caller.
+  auto output_guard = binary_guard(output);
+
+  ERL_NIF_TERM  head, list = argv[1];
+  const ERL_NIF_TERM* tagval;
+  int arity;
+  while (enif_get_list_cell(env, list, &head, &list)) {
+    if (!enif_get_tuple(env, head, &arity, &tagval) || arity != 2) [[unlikely]]
+      return enif_make_badarg(env);
+
+    auto tag = tagval[0];
+    auto val = tagval[1];
+
+    auto [field, numtag] = var->field_with_tag(env, tag);
+    if (!field)
+      return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
+
+    auto res = field->encode_with_tag(env, offset, output, numtag, val);
+    if  (res != am_ok) [[unlikely]]
+      return res == am_error
+           ? enif_raise_exception(env, enif_make_tuple2(env, res, tag))
+           : enif_raise_exception(env, res);
+  }
+
+  if (offset < int(output.size) && !enif_realloc_binary(&output, offset))
+    return enif_raise_exception(env, am_enomem);
+
+  output_guard.release(); // Don't free up the binary when leaving this scope!
+
+  return enif_make_binary(env, &output);
 }
 
 static ERL_NIF_TERM
@@ -273,7 +354,9 @@ list_field_values_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   for (auto& fc : f->values()) {
     ERL_NIF_TERM t;
     auto         n = strlen(fc.value);
-    auto*        p = enif_make_new_binary(env, n, &t);
+    auto         p = enif_make_new_binary(env, n, &t);
+    if (!p) [[unlikely]]
+      return enif_raise_exception(env, am_enomem);
     memcpy(p, fc.value, n);
     res.push_back(enif_make_tuple2(env, t, fc.get_atom(env)));
   }
@@ -508,17 +591,6 @@ static void replace_env_vars(std::string& text) {
   }
 }
 
-static char* maybe_copy_bin(ErlNifBinary& bin, char* buf, size_t sz)
-{
-  if (bin.data[bin.size] == '\0')
-    return (char*)bin.data;
-
-  size_t n = bin.size < sz ? bin.size : sz-1;
-  strncpy(buf, (char*)bin.data, n);
-  buf[n] = '\0';
-  return buf;
-}
-
 // Common functionality of strftime(3) callable from other functions
 //  (Format :: string() | binary(), NowSecsSinceEpoch :: integer(), utc | local) ->
 //      {NumberOfBytesWrittenToRes, IsBinary::boolean()}
@@ -537,7 +609,22 @@ strftime_impl(ErlNifEnv* env, int argc, const ERL_NIF_TERM* argv, char* res, siz
   if (is_bin) {
     if (!enif_inspect_binary(env, argv[0], &bin)) [[unlikely]]
       return std::make_pair(-1, false);
-    pbuf = maybe_copy_bin(bin, buf, sizeof(buf));
+
+    if (sz == 0) [[unlikely]]
+      return std::make_pair(0, true);
+    if (sz == 1 || bin.size <= 1) [[unlikely]] {
+      res[0] = '\0';
+      return std::make_pair(0, true);
+    }
+    // Make sure that the buf space is '\0' terminated
+    if (bin.data[bin.size-1] == '\0')
+      pbuf = (const char*)bin.data;
+    else {
+      size_t n = bin.size < sizeof(buf) ? bin.size : sizeof(buf)-1;
+      strncpy(buf, (char*)bin.data, n);
+      buf[n] = '\0';
+      pbuf   = buf;
+    }
   } else if (enif_get_string(env, argv[0], buf, sizeof(buf), ERL_NIF_LATIN1) > 0) [[likely]]
     pbuf = buf;
   else [[unlikely]]
@@ -577,7 +664,7 @@ static ERL_NIF_TERM str_to_term(ErlNifEnv* env, bool is_bin, const char* str, in
   if (is_bin) {
     ERL_NIF_TERM ret_bin;
     auto p = (char*)enif_make_new_binary(env, sz, &ret_bin);
-    if (!p)
+    if (!p) [[unlikely]]
       return enif_raise_exception(env, am_enomem);
     memcpy(p, str, sz);
     return ret_bin;
@@ -614,7 +701,7 @@ pathftime_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   std::tie(n, is_bin) = strftime_impl(env, argc, argv, res, sizeof(res));
 
   if (n <= 0)
-      return enif_make_badarg(env);
+    return enif_make_badarg(env);
 
   std::string s(res, n);
 
@@ -678,6 +765,7 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     am_binary     = safe_make_atom(env, "binary");
     am_offset     = safe_make_atom(env, "offset");
     am_delim      = safe_make_atom(env, "delim");
+    am_badarg     = safe_make_atom(env, "badarg");
     am_badenv     = safe_make_atom(env, "badenv");
     am_badvariant = safe_make_atom(env, "badvariant");
     am_full       = safe_make_atom(env, "full");
@@ -761,27 +849,29 @@ static void unload(ErlNifEnv* caller_env, void* priv_data)
 
 static ErlNifFunc fix_nif_funcs[] =
 {
-  {"split",              2, split_nif},
-  {"split",              3, split_nif},
-  {"tag_to_field",       2, tag_to_field_nif},
-  {"field_to_tag",       2, field_to_tag_nif},
-  {"decode_field_value", 3, decode_field_value_nif},
-  {"encode_field_value", 3, encode_field_value_nif},
-  {"list_field_values",  2, list_field_values_nif},
-  {"list_fix_variants",  0, list_fix_variants_nif},
-  {"bin_to_integer",     1, bin_to_integer_nif},
-  {"bin_to_integer",     2, bin_to_integer_nif},
-  {"decode_timestamp",   1, decode_timestamp_nif},
-  {"decode_timestamp",   2, decode_timestamp_nif},
-  {"encode_timestamp",   1, encode_timestamp_nif},
-  {"encode_timestamp",   2, encode_timestamp_nif},
-  {"encode_timestamp",   3, encode_timestamp_nif},
-  {"checksum",           1, checksum_nif},
-  {"update_checksum",    1, update_checksum_nif},
-  {"strftime",           2, strftime_nif},
-  {"strftime",           3, strftime_nif},
-  {"pathftime",          2, pathftime_nif},
-  {"pathftime",          3, pathftime_nif},
+  {"split",                 2, split_nif},
+  {"split",                 3, split_nif},
+  {"tag_to_field",          2, tag_to_field_nif},
+  {"field_to_tag",          2, field_to_tag_nif},
+  {"decode_field_value",    3, decode_field_value_nif},
+  {"encode_field_value",    3, encode_field_value_nif},
+  {"encode_field_tagvalue", 3, encode_field_tagvalue_nif},
+  {"encode_fields",         2, encode_fields_nif},
+  {"list_field_values",     2, list_field_values_nif},
+  {"list_fix_variants",     0, list_fix_variants_nif},
+  {"bin_to_integer",        1, bin_to_integer_nif},
+  {"bin_to_integer",        2, bin_to_integer_nif},
+  {"decode_timestamp",      1, decode_timestamp_nif},
+  {"decode_timestamp",      2, decode_timestamp_nif},
+  {"encode_timestamp",      1, encode_timestamp_nif},
+  {"encode_timestamp",      2, encode_timestamp_nif},
+  {"encode_timestamp",      3, encode_timestamp_nif},
+  {"checksum",              1, checksum_nif},
+  {"update_checksum",       1, update_checksum_nif},
+  {"strftime",              2, strftime_nif},
+  {"strftime",              3, strftime_nif},
+  {"pathftime",             2, pathftime_nif},
+  {"pathftime",             3, pathftime_nif},
 };
 
 ERL_NIF_INIT(fix_nif, fix_nif_funcs, load, nullptr, upgrade, unload)

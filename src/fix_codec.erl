@@ -9,7 +9,7 @@
 %%------------------------------------------------------------------------------
 
 -module(fix_codec).
--export([decode/2, decode/3, decode_msg/1, encode/5, encode/6, encode/7]).
+-export([decode/2, decode/3, decode_msg/1, encode/3]).
 
 -include("fix.hrl").
 
@@ -39,13 +39,7 @@ decode(Mode, Bin) ->
 decode_msg(Msg) when is_list(Msg) ->
   fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).
 
-encode(Mode, Msg, SeqNum, Sender, Target) ->
-  encode(Mode, Msg, SeqNum, Sender, Target, fix_util:now()).
-
-encode(Mode, Msg, SeqNum, Sender, Target, SendingTime) ->
-  encode(Mode, Msg, SeqNum, Sender, Target, SendingTime, ?FIX_BEGIN_STR).
-
--spec encode(nif|native, tuple(), non_neg_integer(), binary(), binary(),
-            non_neg_integer(), binary()) -> binary().
-encode(Mode, Msg, SeqNum, Sender, Target, SendTime, FixVerStr) ->
-  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, Msg, SeqNum, Sender, Target, SendTime, FixVerStr).
+-spec encode(nif|native, #header{}, {atom(),map()}) -> binary().
+encode(Mode, #header{fields = F} = Hdr, {_MsgType,_} = Msg) ->
+  Hdr1 = Hdr#header{fields = F#{'BeginString' => ?FIX_BEGIN_STR}},
+  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Hdr1, Msg).

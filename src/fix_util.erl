@@ -10,7 +10,9 @@
 -include("fix.hrl").
 
 -export([now/0, timestamp/0, timestamp/1, decode/5, decode_msg/2,
-         encode/8, dumpstr/1, dump/1, undump/1]).
+         encode/5, dumpstr/1, dump/1, undump/1]).
+-export([try_encode_val/3, try_encode_group/3]).
+-export([encode_tagval/2,  encode_tagval/3]).
 
 -compile({no_auto_import,[now/0]}).
 -compile({parse_transform,etran}).
@@ -76,50 +78,83 @@ decode_msg(CodecMod, Msg) when is_atom(CodecMod), is_list(Msg) ->
       false
   end.
 
--spec encode(atom(), atom(), tuple(), non_neg_integer(), binary(),
-             binary(), non_neg_integer(), binary()) ->
-        binary().
-encode(Mode, EncoderMod, Msg, SeqNum, Sender, Target, SendingTime, FixVerStr)
-  when is_tuple(Msg), is_integer(SeqNum)
-     , is_binary(Sender), is_binary(Target)
-     , is_integer(SendingTime), is_binary(FixVerStr)
+-spec encode(nif|native, atom(), atom(), #header{}, {atom(), map()}) -> binary().
+encode(Mode, EncoderMod, Variant,
+       #header{fields   = #{
+        'BeginString'  := FixVerStr,
+        'MsgSeqNum'    := SeqNum,
+        'SenderCompID' := Sender,
+        'TargetCompID' := Target
+       } = Hdr},
+       {MsgName, MsgFields} = _Msg)
 ->
-  MsgName = element(1, Msg),
-  Fields  = element(2, Msg),
-  Body0   = [
+  L = ['BeginString', 'MsgSeqNum', 'SenderCompID', 'TargetCompID', 'SendingTime'],
+  TStamp0 = maps:get('SendingTime', Hdr, undefined),
+  TStamp  = nvl(TStamp0, timestamp()),
+  MsgFlds = [KV || KV = {_,V} <- maps:to_list(MsgFields), V /= undefined],
+  Fields  = lists:foldl(fun
+              ({_,undefined},A) -> A;
+              (KV,A) -> [KV | A]
+            end, MsgFlds, maps:to_list(maps:without(L, Hdr))),
+  Body    = [
     {'MsgType',      MsgName},
     {'SenderCompID', Sender},
     {'TargetCompID', Target},
-    {'MsgSeqNum',    SeqNum}
-    | [KV || KV = {_,V} <- maps:to_list(Fields), V /= undefined]],
-  Body1 =
-    case maps:get('SendingTime', Fields, undefined) of
-      undefined ->
-        [encode(EncoderMod, Body0),
-         encode_field(EncoderMod, 'SendingTime', timestamp())];
-      _ ->
-        encode(EncoderMod, Body0)
-    end,
+    {'MsgSeqNum',    SeqNum},
+    {'SendingTime',  TStamp}
+    | Fields],
+  encode_msg(Mode, EncoderMod, Variant, Body, FixVerStr).
+
+encode_msg(nif, _EncoderMod, Variant, Body0, FixVerStr) when is_atom(Variant) ->
+  Body1   = encode_msg_nif(Variant, Body0),
+  BodyLen = iolist_size(Body1),
+  Bin     = iolist_to_binary([
+    encode_field_nif(Variant, 'BeginString', FixVerStr),
+    encode_field_nif(Variant, 'BodyLength',  BodyLen),
+    Body1,
+    encode_field_nif(Variant, 'CheckSum', <<"000">>)
+  ]),
+  fix_nif:update_checksum(Bin);
+
+encode_msg(native, EncoderMod, _Variant, Body0, FixVerStr) ->
+  Body1   = encode_msg_native(EncoderMod, Body0),
   BodyLen = iolist_size(Body1),
   Body2   = [
-    encode_field(EncoderMod, 'BeginString', FixVerStr),
-    encode_field(EncoderMod, 'BodyLength',  BodyLen),
+    encode_field_native(EncoderMod, 'BeginString', FixVerStr),
+    encode_field_native(EncoderMod, 'BodyLength',  BodyLen),
     Body1
   ],
-  update_checksum(Mode, EncoderMod, Body2).
+  Bin  = iolist_to_binary(Body2),
+  SumI = lists:sum([Char || <<Char>> <= Bin]) rem 256,
+  SumB = list_to_binary(io_lib:format("~3..0B", [SumI])),
+  <<Bin/binary, "10=", SumB/binary, 1>>.
 
-encode_field(CodecMod, Tag, Val) when is_atom(CodecMod), is_atom(Tag) ->
+encode_field_nif(Variant, Tag, Val) when is_atom(Variant), is_atom(Tag) ->
+  fix_nif:encode_field_tagvalue(Variant, Tag, Val).
+
+encode_field_native(CodecMod, Tag, Val) when is_atom(CodecMod), is_atom(Tag) ->
   {_Num, _Type, Fun} = CodecMod:field_tag(Tag),
   Fun(Val).
 
--spec encode(atom(), binary() | proplists:proplist()) -> iolist().
-encode(_CodecMod, Packet) when is_binary(Packet) -> Packet;
-encode( CodecMod, [{K,V}|T]) when is_atom(K) ->
-  [encode_field(CodecMod, K, V) | encode(CodecMod, T)];
-encode( CodecMod, [{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->
-  [encode_field(CodecMod, K, V) | encode(CodecMod, T)];
-encode(_Variant, []) ->
-  [].
+-spec encode_msg_native(atom(), binary() | proplists:proplist()) -> iolist().
+encode_msg_native( CodecMod, [{K,V}|T]) when is_atom(K) ->
+  [encode_field_native(CodecMod, K, V) | encode_msg_native(CodecMod, T)];
+encode_msg_native( CodecMod, [{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->
+  [encode_field_native(CodecMod, K, V) | encode_msg_native(CodecMod, T)];
+encode_msg_native(_CodecMod, []) ->
+  [];
+encode_msg_native(_CodecMod, Packet) when is_binary(Packet) ->
+  Packet.
+
+-spec encode_msg_nif(atom(), binary() | proplists:proplist()) -> iolist().
+encode_msg_nif( Variant, [{K,V}|T]) when is_atom(K) ->
+  [fix_nif:encode_field_tagvalue(Variant, K, V) | encode_msg_nif(Variant, T)];
+encode_msg_nif( Variant, [{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->
+  [fix_nif:encode_field_tagvalue(Variant, K, V) | encode_msg_nif(Variant, T)];
+encode_msg_nif(_Variant, []) ->
+  [];
+encode_msg_nif(_Variant, Packet) when is_binary(Packet) ->
+  Packet.
 
 -spec dump(binary() | iolist()) -> binary().
 dump(Bin) when is_binary(Bin) ->
@@ -138,15 +173,47 @@ dumpstr(Encoded) ->
 do_split(nif,    Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
 do_split(native, Variant, Bin, Opts) -> fix_native:split(Variant, Bin, Opts).
 
--spec update_checksum(nif|native, atom(), [{atom(), any()}]) -> binary().
-update_checksum(nif, EncoderMod, Msg) ->
-  Body = [Msg, encode_field(EncoderMod, 'CheckSum', <<"000">>)],
-  Bin  = iolist_to_binary(Body),
-  fix_nif:update_checksum(Bin);
-update_checksum(native, _EncoderMod, Bin) ->
-  SumI = lists:sum([Char || <<Char>> <= Bin]) rem 256,
-  SumB = list_to_binary(io_lib:format("~3..0B", [SumI])),
-  <<Bin/binary, "10=", SumB/binary, 1>>.
+try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, $Y);
+try_encode_val(ID, bool,   false)                -> encode_tagval(ID, $N);
+try_encode_val(ID, int,    V) when is_integer(V) -> encode_tagval(ID, integer_to_binary(V));
+try_encode_val(ID, length, V) when is_integer(V) -> encode_tagval(ID, integer_to_binary(V));
+try_encode_val(ID, char,   V) when is_integer(V), V >= $!, V =< $~ -> encode_tagval(ID, $V);
+try_encode_val(ID, string, V) when is_list(V)    -> encode_tagval(ID, list_to_binary(V));
+try_encode_val(ID, string, V) when is_binary(V)  -> encode_tagval(ID, V);
+try_encode_val(ID, binary, V) when is_binary(V)  -> encode_tagval(ID, V);
+try_encode_val(ID, datetm, V) when is_integer(V) -> encode_tagval(ID, fix_nif:encode_timestamp(V));
+try_encode_val(ID, datetm, V) when is_binary(V)  -> encode_tagval(ID, V);
+try_encode_val(ID, T,      V) -> erlang:error({cannot_encode_val, ID, T, V}).
+
+try_encode_group(Mod, ID, [#group{fields=[]}|T]) -> try_encode_group(Mod, ID, T);
+try_encode_group(Mod, ID, [#group{fields=L}|_] = V) when is_list(L) ->
+  N        = length(V),
+  DelimFld = element(1, hd(L)),
+  [try_encode_val(ID, length, N) | try_encode_group_items(Mod, ID, DelimFld, V)];
+try_encode_group(_Mod, ID, []) ->
+  encode_tagval(ID, 0).
+
+%% The group fields must all start from the same field name, so that the FIX
+%% decoder can decode groups correctly
+try_encode_group_items(Mod, ID, DelimFld, [#group{fields=[{DelimFld, _}|_]=V}|T]) ->
+  Data = [encode_field(Mod, K, I) || {K,I} <- V],
+  [Data | try_encode_group_items(Mod, ID, DelimFld, T)];
+try_encode_group_items(_Mod, ID, DelimFld, [#group{fields=[{Other, _}|_]}|_]) ->
+  S = str("invalid first tag for group ~w: expected=~w, got=~w", [ID, DelimFld, Other]),
+  erlang:error(list_to_binary(S));
+try_encode_group_items(_Mod, _ID, _DelimFld, []) ->
+  [].
+
+encode_tagval(ID, V)        -> encode_tagval(ID, V, true).
+encode_tagval(ID, V, true)  -> [integer_to_binary(ID), $=, V, ?SOH];
+encode_tagval(ID, V, false) -> [integer_to_binary(ID), $=, V].
+
+encode_field(Mod, ID, Val) when is_atom(ID) ->
+  case Mod:field_tag(ID) of
+    {_Num, _Type, false} -> encode_tagval(ID, Val, true);
+    {_Num, _Type, Fun}   -> Fun(Val)
+  end.
+
 
 -ifdef(TEST).
 -endif.

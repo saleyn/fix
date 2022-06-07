@@ -258,7 +258,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
   ok  = write_file(erlang, src, State, FN2++".erl", [], [
     "-module(", FN2, ").\n"
     "-export([field/1, field_tag/1]).\n\n"
-    "-define(SOH, 1).\n\n",
+    "-import(fix_util, [try_encode_val/3, try_encode_group/3, encode_tagval/2]).\n\n",
     lists:map(fun({ID, {Name, Type, _FldOrGrp, Vals}}) ->
       [
         "field(",string:pad(integer_to_list(ID),MID, leading),") -> {",
@@ -276,7 +276,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
       ["field_tag(", sqpad(atom_to_list(Name), MaxLen), ") -> {", SS, ", fun(V) -> ",
        if
         TT == group ->
-          ["try_encode_group",string:pad(" ",MID-2),"(", string:pad(integer_to_list(ID), MID+8, leading), ", V)"];
+          ["try_encode_group",string:pad(" ",MID-2),"(?MODULE,", string:pad(integer_to_list(ID), MID, leading), ", V)"];
         Vals==[] ->
           ["try_encode_val",string:pad(" ",MID),"(", SS, ", V)"];
         true ->
@@ -312,36 +312,10 @@ generate_fields(Fields, FldMap, #state{} = State) ->
       ]
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
     "\n"
-    "try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, <<\"Y\">>);\n"
-    "try_encode_val(ID, bool,   false)                -> encode_tagval(ID, <<\"N\">>);\n"
-    "try_encode_val(ID, int,    V) when is_integer(V) -> encode_tagval(ID, integer_to_binary(V));\n"
-    "try_encode_val(ID, length, V) when is_integer(V) -> encode_tagval(ID, integer_to_binary(V));\n"
-    "try_encode_val(ID, char,   V) when is_integer(V), V >= $!, V =< $~ -> encode_tagval(ID, <<V>>);\n"
-    "try_encode_val(ID, string, V) when is_list(V)    -> encode_tagval(ID, list_to_binary(V));\n"
-    "try_encode_val(ID, string, V) when is_binary(V)  -> encode_tagval(ID, V);\n"
-    "try_encode_val(ID, binary, V) when is_binary(V)  -> encode_tagval(ID, V);\n"
-    "try_encode_val(ID, datetm, V) when is_integer(V) -> encode_tagval(ID, fix_nif:encode_timestamp(V));\n"
-    "try_encode_val(ID, datetm, V) when is_binary(V)  -> encode_tagval(ID, V);\n"
-    "try_encode_val(ID, T,      V) -> erlang:error({cannot_encode_val, ID, T, V}).\n\n"
-    "try_encode_group(ID, [{group, _, _M}|_] = V) when is_map(_M) ->\n"
-    "  N = length(V),\n"
-    "  encode_tagval(ID, [integer_to_binary(N), ?SOH,\n"
-    "                      [encode_field(K,I) || {group, _, M} <- V, {K,I} <- maps:to_list(M)]], false);\n"
-    "try_encode_group(ID, []) ->\n"
-    "  encode_tagval(ID, <<\"0\">>).\n\n"
-    "encode_tagval(ID, V) ->\n"
-    "  encode_tagval(ID, V, true).\n"
-    "encode_tagval(ID, V, true) ->\n"
-    "  [integer_to_binary(ID), $=, V, ?SOH];\n\n"
-    "encode_tagval(ID, V, false) ->\n"
-    "  [integer_to_binary(ID), $=, V].\n\n"
-    "encode_field(Tag, Val) when is_atom(Tag) ->\n"
-    "  {_Num, _Type, Fun} = field_tag(Tag),\n"
-    "  Fun(Val).\n\n"
   ]),
   ok = write_file(erlang, src, State, "fix_codec" ++ State#state.var_sfx ++ ".erl", [], [
     "-module(fix_codec", State#state.var_sfx, ").\n"
-    "-export([decode/2, decode/3, decode_msg/1, encode/5, encode/6, encode/7]).\n"
+    "-export([decode/2, decode/3, decode_msg/1, encode/3]).\n"
     "\n"
     "-include(\"fix.hrl\").\n"
     "\n"
@@ -371,16 +345,10 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     "decode_msg(Msg) when is_list(Msg) ->\n"
     "  fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).\n"
     "\n"
-    "encode(Mode, Msg, SeqNum, Sender, Target) ->\n"
-    "  encode(Mode, Msg, SeqNum, Sender, Target, fix_util:now()).\n"
-    "\n"
-    "encode(Mode, Msg, SeqNum, Sender, Target, SendingTime) ->\n"
-    "  encode(Mode, Msg, SeqNum, Sender, Target, SendingTime, ?FIX_BEGIN_STR).\n"
-    "\n"
-    "-spec encode(nif|native, tuple(), non_neg_integer(), binary(), binary(),\n"
-    "            non_neg_integer(), binary()) -> binary().\n"
-    "encode(Mode, Msg, SeqNum, Sender, Target, SendTime, FixVerStr) ->\n"
-    "  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, Msg, SeqNum, Sender, Target, SendTime, FixVerStr).\n"
+    "-spec encode(nif|native, #header{}, {atom(),map()}) -> binary().\n"
+    "encode(Mode, #header{fields = F} = Hdr, {_MsgType,_} = Msg) ->\n"
+    "  Hdr1 = Hdr#header{fields = F#{'BeginString' => ?FIX_BEGIN_STR}},\n"
+    "  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Hdr1, Msg).\n"
   ]),
   %%if Variant == "" ->
   %%  ok;
@@ -1007,10 +975,15 @@ to_char_str(S) ->
   "CINT<"++string:join([qname([C]) || C <- S], ",")++">".
 
 caml_case(S)   ->
-  L0 = [titlecase(I) || I <- string:split(string:to_lower(S), "_", all)],
-  put(len, 0),
-  L = lists:takewhile(fun(I) -> N = get(len) + length(I), put(len, N), N < 128 end, L0),
-  string:join(L, "").
+  case lists:member($_, S) of
+    true ->
+      L0 = [titlecase(I) || I <- string:split(string:to_lower(S), "_", all)],
+      put(len, 0),
+      L = lists:takewhile(fun(I) -> N = get(len) + length(I), put(len, N), N < 128 end, L0),
+      string:join(L, "");
+    false ->
+      S
+  end.
 
 titlecase([])    -> [];
 titlecase([H|T]) -> [upcase(H)|T].

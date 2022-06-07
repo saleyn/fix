@@ -1,34 +1,35 @@
 
 -include_lib("kernel/include/logger.hrl").
 
+-define(SOH, 1).
+
 -record(fix, {
-  pid :: pid(),
-  message,
+  msg,
   bin :: binary()
 }).
 
 -type fix() :: #fix{}.
 
 -record(group, {
-  name   = undefined,   %% Group name
-  fields = #{}          %% Group fields
+  name  :: atom(),      %% Group name
+  fields = []           %% Group fields
 }).
 
 -record('header', {
   fields = #{
-      'BeginString'               => undefined %% Tag#   8
-    , 'BodyLength'                => undefined %% Tag#   9
-    , 'MsgType'                   => undefined %% Tag#  35
-    , 'SenderCompID'              => undefined %% Tag#  49
-    , 'TargetCompID'              => undefined %% Tag#  56
-    , 'MsgSeqNum'                 => undefined %% Tag#  34
-    , 'PossDupFlag'               => false     %% Tag#  43
-    , 'PossResend'                => false     %% Tag#  97
-    , 'SendingTime'               => undefined %% Tag#  52
-    , 'LastMsgSeqNumProcessed'    => undefined %% Tag# 369
+      'BeginString'  => undefined %% Tag#   8
+    , 'BodyLength'   => undefined %% Tag#   9
+    , 'MsgType'      => undefined %% Tag#  35
+    , 'SenderCompID' => undefined %% Tag#  49
+    , 'TargetCompID' => undefined %% Tag#  56
+    , 'MsgSeqNum'    => undefined %% Tag#  34
+    , 'SendingTime'  => undefined %% Tag#  52
   }
   %% Optional fields:
   %% ================
+  %% Tag#  43: PossDupFlag
+  %% Tag#  97: PossResend
+  %% Tag# 369: LastMsgSeqNumProcessed
   %% Tag# 115: OnBehalfOfCompID
   %% Tag# 128: DeliverToCompID
   %% Tag#  90: SecureDataLen
