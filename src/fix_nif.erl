@@ -98,7 +98,7 @@ init_nif() ->
 
 get_variants_from_env() ->
   case os:getenv("FIX_VARIANTS") of
-    undefined ->
+    false ->
       [];
     Env ->
       lists:foldl(fun(S,L) ->
