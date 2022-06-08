@@ -38,6 +38,7 @@ init_nif() ->
   %% or application names in which the `priv' dirs will be searched for
   %% '*.so' files:
   Apps  = application:which_applications(),
+  Vars  = application:get_env(fix, fix_variants, get_variants_from_env()),
   Files = lists:foldl(fun(V, S) ->
     Msk =
       if is_atom(V) ->
@@ -82,7 +83,7 @@ init_nif() ->
       Names ->
         Names ++ S
     end
-  end, [], [Priv | application:get_env(fix, fix_variants, [])]),
+  end, [], [Priv | Vars]),
 
   Dbg  = list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")),
   Dbg > 0 andalso
@@ -93,6 +94,24 @@ init_nif() ->
     ok -> ok;
     {error, {Reason,Text}} ->
       throw("Load fix_nif failed. ~p:~p~n", [Reason, Text])
+  end.
+
+get_variants_from_env() ->
+  case os:getenv("FIX_VARIANTS") of
+    undefined ->
+      [];
+    Env ->
+      lists:foldl(fun(S,L) ->
+        try
+          A = list_to_existing_atom(S),
+          case lists:keymember(A, 1, application:which_applications()) of
+            true  -> [A | L];
+            false -> L
+          end
+        catch _:_ ->
+          L
+        end
+      end, [], string:split(Env, ":", all))
   end.
 
 %% @doc Parse FIX binary message returning string fields as {Pos,Len} offsets.
