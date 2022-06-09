@@ -30,17 +30,22 @@
 -compile({parse_transform,  etran}).  % Use parse transforms from etran library
 
 init_nif() ->
-  Priv  = filename:dirname(code:which(?MODULE)) ++ "/../priv",
-  Name  = filename:join(Priv, ?MODULE_STRING),
+  Priv   = filename:dirname(code:which(?MODULE)) ++ "/../priv",
+  Name   = filename:join(Priv, ?MODULE_STRING),
 
   %% Get the list of supported FIX variants to load. These should be either
   %% directory names containing `*.so' files, or the full `*.so' file names
   %% or application names in which the `priv' dirs will be searched for
   %% '*.so' files:
-  Apps  = application:which_applications(),
-  Vars  = application:get_env(fix, fix_variants, get_variants_from_env()),
-  Files = lists:foldl(fun(V, S) ->
-    Msk =
+  Apps   = application:which_applications(),
+  Vars   = application:get_env(fix, fix_variants, get_variants_from_env()),
+  TsType = application:get_env(fix, ts_type,      sec),
+
+  lists:member(TsType, [sec, us, ms]) orelse
+    throw("Invalid FIX_TS_TYPE=~s (expected: sec|us|ms)", [TsType]),
+
+  Files  = lists:foldl(fun(V, S) ->
+    Msk  =
       if is_atom(V) ->
         case lists:keymember(V, 1, Apps) of
           true ->
@@ -86,9 +91,10 @@ init_nif() ->
   end, [], [Priv | Vars]),
 
   Dbg  = list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")),
-  Dbg > 0 andalso
-    io:format("FIX so files: ~p\n", [Files]),
-  Load = erlang:load_nif(Name, [{so_files, Files}, {debug, Dbg}]),
+  Dbg > 0 andalso io:format("FIX so files: ~p\n", [Files]),
+
+  Args = [{so_files, Files}, {debug, Dbg}, {ts_type, TsType}],
+  Load = erlang:load_nif(Name, Args),
 
   case Load of
     ok -> ok;
@@ -219,17 +225,20 @@ encode_timestamp(_Value) ->
 encode_timestamp(_Value, _UTC) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
-%% @doc Convert micro-/milli-seconds from UNIX epoch to a timestamp binary
+%% @doc Convert micro-/milli-/seconds from UNIX epoch to a timestamp binary
 %% in the form "YYYYMMDD-hh:mm:ss[.ttt[ttt]]".
 %% Throws `badarg' on failure or `memalloc' if cannot allocate memory.
 %%
 %% Args:
 %% <ul>
-%% <li>Value - Usec or Msec from epoch</li>
-%% <li>utc|local - UTC (default) or local time</li>
-%% <li>Resolution - `us' (microseconds) | `ms' - milliseconds (default)</li>
+%% <li>Value      - Sec or Usec or Msec from epoch</li>
+%% <li>utc|local  - UTC (default) or local time</li>
+%% <li>Resolution - `sec' seconds (default) |
+%%                  `us'  microseconds      |
+%%                  `ms'  milliseconds
+%% </li>
 %% </ul>
--spec encode_timestamp(non_neg_integer(), utc|local, us|ms) -> binary().
+-spec encode_timestamp(non_neg_integer(), utc|local, sec|us|ms) -> binary().
 encode_timestamp(_Value, _UTC, _Resolution) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
@@ -261,11 +270,14 @@ bin_to_integer_test() ->
 encode_decode_timestamp_test() ->
   ?assertEqual(1646002459113369, decode_timestamp(<<"20220227-22:54:19.113369">>)),
   ?assertEqual(1646002459113369, decode_timestamp(<<"20220227-22:54:19.113369">>, utc)),
-  ?assertEqual(1646020459113369, decode_timestamp(<<"20220227-22:54:19.113369">>, local)),
+  ?assertEqual(1646020459113369, decode_timestamp(<<"20220227-17:54:19.113369">>, local)),
   ?assertEqual(<<"20220227-22:54:19.113369">>, encode_timestamp(decode_timestamp(<<"20220227-22:54:19.113369">>))),
   ?assertEqual(<<"20220227-22:54:19.113369">>, fix_nif:encode_timestamp(1646002459113369, utc,   us)),
   ?assertEqual(<<"20220227-22:54:19.113">>,    fix_nif:encode_timestamp(1646002459113369, utc,   ms)),
+  ?assertEqual(<<"20220227-22:54:19">>,        fix_nif:encode_timestamp(1646002459113369, utc,   sec)),
   ?assertEqual(<<"20220227-17:54:19.113">>,    fix_nif:encode_timestamp(1646002459113369, local, ms)),
+  ?assertEqual(<<"20220227-17:54:19">>,        fix_nif:encode_timestamp(1646002459113369, local, sec)),
+  ?assertEqual(<<"20220227-17:54:19">>,        fix_nif:encode_timestamp(1646002459113369, local)),
   ok.
 
 strftime_test() ->

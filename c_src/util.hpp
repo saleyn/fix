@@ -91,7 +91,14 @@ enum FieldType {
   UTCTIMESTAMP,
 };
 
+enum class TsType {
+  Seconds  = 0,
+  Millisec = 3,
+  Microsec = 6,
+};
+
 struct FixVariant;
+struct Persistent;
 
 struct FieldChoice {
   const char*           value;
@@ -174,6 +181,9 @@ struct Field {
   ERL_NIF_TERM            value_atom(unsigned idx) const;
   ERL_NIF_TERM            value_atom(std::string_view const& val) const;
 
+  FixVariant const* variant()     const { assert(m_var); return m_var; }
+  Persistent const* pers()        const;
+
   std::vector<FieldChoice> const& values() const { return m_choices; }
 
   ERL_NIF_TERM decode(ErlNifEnv* env, const char* code, int len);
@@ -187,7 +197,6 @@ struct Field {
   // `<<Tag/binary, 1, Value/binary, 1>>`
   ERL_NIF_TERM encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
                                ERL_NIF_TERM tag, ERL_NIF_TERM val);
-
 private:
   using TermMap = std::unordered_map<ERL_NIF_TERM, ERL_NIF_TERM>;
   using NameMap = std::unordered_map<std::string_view, const FieldChoice*>;
@@ -217,14 +226,20 @@ struct Persistent {
   using Map      = std::unordered_map<ERL_NIF_TERM, FixVariant*>;
 
   // Takes a vector of shared object files to load containing FIX variants
-  Persistent(std::vector<std::string> const& so_files, int debug = 0);
+  Persistent
+  (
+    std::vector<std::string> const& so_files,
+    int                             debug   = 0,
+    TsType                          ts_type = TsType::Seconds
+  );
 
   ~Persistent();
 
-  ErlNifEnv*          env()                   { return m_env;   }
-  ErlNifEnv const*    env()             const { return m_env;   }
+  ErlNifEnv*          env()                   { return m_env;     }
+  ErlNifEnv const*    env()             const { return m_env;     }
 
-  int                 debug()           const { return m_debug; }
+  int                 debug()           const { return m_debug;   }
+  TsType              ts_type()         const { return m_ts_type; }
 
   FixVariant*         get(ERL_NIF_TERM);
   bool                get(ERL_NIF_TERM, FixVariant*& var);
@@ -242,6 +257,7 @@ private:
   Map                 m_variants_map;
   ErlNifEnv*          m_env;
   int                 m_debug;
+  TsType              m_ts_type;
 
   ERL_NIF_TERM        make_atom(const char* am);
 };
@@ -254,12 +270,14 @@ struct FixVariant {
   using FieldValsArray   = std::vector<std::vector<FieldChoice>>;
   using FieldAndTagConst = std::pair<Field const*, ERL_NIF_TERM>;
   using FieldAndTag      = std::pair<Field*,       ERL_NIF_TERM>;
- 
+
   FixVariant(Persistent* pers, const std::string& path);
 
   ~FixVariant();
 
   int                 debug()   const { return m_pers->debug(); }
+  Persistent  const*  pers()    const { return m_pers;          }
+
   std::string const&  variant() const { return m_variant;       }
   std::string const&  so_path() const { return m_so_path;       }
   ErlNifEnv*          env()           { return m_pers->env();   }
@@ -272,14 +290,14 @@ struct FixVariant {
   Field const*        field(ErlNifEnv*, ERL_NIF_TERM tag) const;
   Field*              field(ErlNifEnv*, ERL_NIF_TERM tag);
 
-  // This function returns a pointer to a Field, and a binary tag 
+  // This function returns a pointer to a Field, and a binary tag
   // value. Note that the binary is for internal use within the NIF
   // driver, and if returned back to Erlang, need to be wrapped by
   // a enif_make_copy() call!
   FieldAndTagConst    field_with_tag(unsigned idx) const;
   FieldAndTag         field_with_tag(unsigned idx);
 
-  // This function returns a pointer to a Field, and a binary tag 
+  // This function returns a pointer to a Field, and a binary tag
   // value. Note that the binary is for internal use within the NIF
   // driver, and if returned back to Erlang, need to be wrapped by
   // a enif_make_copy() call!
@@ -481,7 +499,8 @@ inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool
 }
 
 template <int N, typename Ch = char>
-int encode_timestamp(Ch (&buf)[N], uint64_t usecs, bool msec=false, bool utc=true)
+int encode_timestamp(Ch (&buf)[N], uint64_t usecs, TsType tt = TsType::Seconds,
+                     bool utc=true)
 {
   static_assert(N > 24);
 
@@ -494,20 +513,24 @@ int encode_timestamp(Ch (&buf)[N], uint64_t usecs, bool msec=false, bool utc=tru
   if (res == nullptr)
     return 0;
 
-  if (msec) us /= 1000;
+  if (tt == TsType::Millisec) us /= 1000;
 
-  return snprintf((char*)buf, N, msec ? "%04d%02d%02d-%02d:%02d:%02d.%03d"
-                                      : "%04d%02d%02d-%02d:%02d:%02d.%06d",
+  const auto fmt = tt == TsType::Seconds  ? "%04d%02d%02d-%02d:%02d:%02d"
+                 : tt == TsType::Millisec ? "%04d%02d%02d-%02d:%02d:%02d.%03d"
+                                          : "%04d%02d%02d-%02d:%02d:%02d.%06d";
+
+  return snprintf((char*)buf, N, fmt,
                   tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec, us);
 }
 
 inline ERL_NIF_TERM
-encode_timestamp(ErlNifEnv* env, uint64_t usecs, bool msec=false, bool utc=true)
+encode_timestamp(ErlNifEnv* env, uint64_t usecs, TsType tt=TsType::Seconds,
+                 bool utc=true)
 {
   char buf[64];
 
-  auto n = encode_timestamp(buf, usecs, msec, utc);
+  auto n = encode_timestamp(buf, usecs, tt, utc);
 
   if (n == 0) [[unlikely]]
     return enif_make_badarg(env);
@@ -702,6 +725,9 @@ inline void Field::operator=(Field const& a_rhs)
 inline int
 Field::debug() const { return m_var->debug(); }
 
+inline Persistent const*
+Field::pers()  const { assert(m_var); return m_var->pers(); }
+
 inline ERL_NIF_TERM
 Field::get_atom() const
 {
@@ -754,7 +780,7 @@ Field::encode(ErlNifEnv* env, ERL_NIF_TERM val)
 }
 
 // Return a binary <<Tag/binary, $=, Value/binary, 1>>
-inline ERL_NIF_TERM 
+inline ERL_NIF_TERM
 Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
                        ERL_NIF_TERM tag, ERL_NIF_TERM val)
 {
@@ -783,7 +809,7 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
     long n;
     if (enif_get_long(env, val, &n)) {
       if (m_dtype == DataType::DATETIME)
-        bval.size  = encode_timestamp(tmp, n);
+        bval.size  = encode_timestamp(tmp, n, pers()->ts_type());
       else
         bval.size  = snprintf((char*)tmp, sizeof(tmp), "%ld", n);
       bval.data = tmp;
@@ -795,7 +821,7 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
   auto   sz     = btag.size + bval.size + 2 /* 2xSOH */;
   size_t needed = sz;
   unsigned char*  p;
-  
+
   if (!offset) {
     assert(res.data == nullptr);
     if (!enif_alloc_binary(needed, &res))
@@ -880,9 +906,11 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
 }
 
 //------------------------------------------------------------------------------
-inline Persistent::Persistent(std::vector<std::string> const& so_files, int debug)
+inline Persistent::Persistent(std::vector<std::string> const& so_files,
+                              int debug, TsType ts_type)
   : m_env(enif_alloc_env())
   , m_debug(debug)
+  , m_ts_type(ts_type)
 {
   for (auto& file : so_files)
   {
@@ -992,7 +1020,7 @@ inline FixVariant
     throw std::runtime_error
       ("FIX variant '" + m_variant + "' empty fields: " + so_file);
 
-  DBGPRINT(m_pers->debug(), 1, "FIX(%s): initializing %lu fields", 
+  DBGPRINT(m_pers->debug(), 1, "FIX(%s): initializing %lu fields",
       m_variant.c_str(), m_fields.size());
 
   m_bins.resize(0);
@@ -1004,7 +1032,7 @@ inline FixVariant
     char s[16];
     int  len = snprintf(s, sizeof(s), "%d", i);
 
-    DBGPRINT(m_pers->debug(), 4, "FIX(%s): initializing binary: %s", 
+    DBGPRINT(m_pers->debug(), 4, "FIX(%s): initializing binary: %s",
       m_variant.c_str(), s);
 
     m_bins.emplace_back(create_binary(env(), std::string_view(s, len)));

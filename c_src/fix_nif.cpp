@@ -29,6 +29,8 @@ static ERL_NIF_TERM am_utc;
 static ERL_NIF_TERM am_local;
 static ERL_NIF_TERM am_us;
 static ERL_NIF_TERM am_ms;
+static ERL_NIF_TERM am_sec;
+static ERL_NIF_TERM am_ts_type;
 static ERL_NIF_TERM am_binary;
 static ERL_NIF_TERM am_offset;
 static ERL_NIF_TERM am_delim;
@@ -220,7 +222,7 @@ encode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     ERL_NIF_TERM bin;
     char buf[32];
     int  len = (field->dtype() == DataType::DATETIME)
-             ? encode_timestamp(buf, n)
+             ? encode_timestamp(buf, n, pers->ts_type())
              : snprintf(buf, sizeof(buf), "%ld", n);
     if (len == 0) [[unlikely]]
       return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
@@ -455,15 +457,20 @@ decode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 }
 
 // Args:
-// 1. Timestamp  :: integer()     - Usec or Msec from epoch
-// 2. 'utc'|'local' :: atom()     - 'utc' if UTC time, 'local' if local time
-// 3. 'us' | 'ms'   :: atom()     - 'us' - microseconds (default), 'ms' - milliseconds
+// 1. Timestamp :: integer()  - Usec or Msec from epoch
+// 2. utc|local :: atom()     - 'utc' if UTC time, 'local' if local time
+// 3. sec|us|ms :: atom()     - seconds (default), microseconds, milliseconds
 static ERL_NIF_TERM
 encode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
   auto utc  = true;
-  auto msec = false;
-  uint64_t  t;
+  uint64_t t;
+
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  TsType ts_type = pers->ts_type();
 
   if (argc == 0 || !enif_get_uint64(env, argv[0], &t) || argc > 3)
     return enif_make_badarg(env);
@@ -479,14 +486,18 @@ encode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (argc == 3) {
       if (!enif_is_atom(env, argv[2]))
         return enif_make_badarg(env);
+      else if (enif_is_identical(argv[2], am_sec))
+        ts_type = TsType::Seconds;
       else if (enif_is_identical(argv[2], am_ms))
-        msec = true;
-      else if (!enif_is_identical(argv[2], am_us))
+        ts_type = TsType::Millisec;
+      else if (enif_is_identical(argv[2], am_us))
+        ts_type = TsType::Microsec;
+      else
         return enif_make_badarg(env);
     }
   }
 
-  return encode_timestamp(env, t, msec, utc);
+  return encode_timestamp(env, t, ts_type, utc);
 }
 
 // Calculate the FIX checksum of a binary message body
@@ -714,11 +725,11 @@ pathftime_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 // Utility functions
 //------------------------------------------------------------------------------
 
-static int init_env
-  (void** priv_data, std::vector<std::string> const& so_files, int debug)
+static int init_env(void** priv_data, std::vector<std::string> const& so_files,
+                    int debug, TsType ts_type)
 {
   // Init persistent environment that owns some binaries shared across NIF calls
-  try   {*priv_data = (void*)(new Persistent(so_files, debug));}
+  try   {*priv_data = (void*)(new Persistent(so_files, debug, ts_type));}
   catch (std::exception const& e)
   {
     std::ostringstream str;
@@ -751,6 +762,7 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
   ERL_NIF_TERM arg_files=0, head, list=load_info;
 
   std::vector<std::string>  so_files;
+  TsType                    ts_type = TsType::Seconds;
 
   if (!enif_is_list(env, load_info)) {
     errs = "Initialization argument is not a list!";
@@ -762,6 +774,8 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     am_local      = safe_make_atom(env, "local");
     am_us         = safe_make_atom(env, "us");
     am_ms         = safe_make_atom(env, "ms");
+    am_sec        = safe_make_atom(env, "sec");
+    am_ts_type    = safe_make_atom(env, "ts_type");
     am_binary     = safe_make_atom(env, "binary");
     am_offset     = safe_make_atom(env, "offset");
     am_delim      = safe_make_atom(env, "delim");
@@ -789,7 +803,15 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
       continue;
     else if (enif_is_identical(opts[0], am_so_files) && enif_is_list(env, opts[1]))
       arg_files = opts[1];
-    else {
+    else if (enif_is_identical(opts[0], am_ts_type)  && enif_is_atom(env, opts[1])) {
+      if      (enif_is_identical(opts[1], am_sec))  ts_type = TsType::Seconds;
+      else if (enif_is_identical(opts[1], am_us))   ts_type = TsType::Microsec;
+      else if (enif_is_identical(opts[1], am_ms))   ts_type = TsType::Millisec;
+      else {
+        errs = "Invalid ts_type";
+        goto ERR;
+      }
+    } else {
       errs = "Invalid argument";
       goto ERR;
     }
@@ -817,7 +839,7 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
       DBGPRINT(debug, 1, "FIX: file %s", f.c_str());
   }
 
-  return init_env(priv_data, so_files, debug);
+  return init_env(priv_data, so_files, debug, ts_type);
 
 ERR:
   fprintf(stderr, "%s\r\n", errs);
