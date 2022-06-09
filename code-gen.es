@@ -695,8 +695,9 @@ usage() ->
     , [filename:basename(escript:script_name())]),
   halt(1).
 
-read_file(#state{file = Xml, schema = Schema, config = Config}) ->
+read_file(#state{file = Xml, schema = Schema, config = Config, debug = Debug}) ->
   InclMsgs   = proplists:get_value(include_app_messages, Config, []),
+  Debug > 0    andalso io:format(standard_error, "InclMsgs config: ~p\n", [InclMsgs]),
   % Read file using the Schema to format value types
   {fix,AA,L} = xmltree:file(Xml, Schema),
   MajorVsn   = get_attr(major, AA),
@@ -711,10 +712,10 @@ read_file(#state{file = Xml, schema = Schema, config = Config}) ->
   Messages   = [{M, T, C, expand_components(I, Components, M)}
                 || {messages,   _, J} <- L,
                    {message,    A, I} <- J,
-                   {msgcat,        C} <- A,
                    {msgtype,       T} <- A,
                    {name,          M} <- A,
-                C==admin orelse InclMsgs==[] orelse lists:member(M, InclMsgs)],
+                   C                  <- [get_attr(msgcat, A, app)],
+                C==admin orelse InclMsgs == [] orelse lists:member(M, InclMsgs)],
   Fun        = fun G({_, _, _, FL}, Acc) -> lists:foldl(G, Acc, FL);
                    G({field, A, _}, Acc) -> [get_attr(name,A)|Acc];
                    G({group, A,FL}, Acc) -> lists:foldl(G, [get_attr(name,A)|Acc], FL)
