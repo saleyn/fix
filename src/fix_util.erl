@@ -10,7 +10,7 @@
 -include("fix.hrl").
 
 -export([now/0, timestamp/0, timestamp/1, decode/5, decode_msg/2,
-         encode/5, dumpstr/1, dump/1, undump/1]).
+         encode/5, dumpstr/1, dump/1, undump/1, split/4]).
 -export([try_encode_val/3, try_encode_group/3]).
 -export([encode_tagval/2,  encode_tagval/3]).
 
@@ -49,7 +49,7 @@ timestamp(EpochUSecs) when is_integer(EpochUSecs) ->
      | error.
 decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
   try
-    case do_split(Mode, FixVariant, Bin, Options) of
+    case split(Mode, FixVariant, Bin, Options) of
       {ok, MsgLen, Msg} when MsgLen == byte_size(Bin) ->
         {ok, <<>>, decode_msg(CodecMod, Msg)};
       {ok, MsgLen, Msg} ->
@@ -170,8 +170,8 @@ undump(Bin) when is_binary(Bin) ->
 dumpstr(Encoded) ->
   io:format("~s~n", [binary_to_list(dump(Encoded))]).
 
-do_split(nif,    Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
-do_split(native, Variant, Bin, Opts) -> fix_native:split(Variant, Bin, Opts).
+split(nif,    Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
+split(native, Variant, Bin, Opts) -> fix_native:split(Variant, Bin, Opts).
 
 try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, $Y);
 try_encode_val(ID, bool,   false)                -> encode_tagval(ID, $N);

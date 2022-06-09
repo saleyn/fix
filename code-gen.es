@@ -315,7 +315,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
   ]),
   ok = write_file(erlang, src, State, "fix_codec" ++ State#state.var_sfx ++ ".erl", [], [
     "-module(fix_codec", State#state.var_sfx, ").\n"
-    "-export([decode/2, decode/3, decode_msg/1, encode/3]).\n"
+    "-export([decode/2, decode/3, decode_msg/1, encode/3, split/2, split/3]).\n"
     "\n"
     "-include_lib(\"fix/include/fix.hrl\").\n"
     "\n"
@@ -342,13 +342,20 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     "decode(Mode, Bin) ->\n"
     "  decode(Mode, Bin, []).\n"
     "\n"
+    "%% Decodes a list of [{Key, Value}] pairs to a FIX message.\n"
+    "%% Use after splitting the message with split/1\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
     "  fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).\n"
     "\n"
     "-spec encode(nif|native, #header{}, {atom(),map()}) -> binary().\n"
     "encode(Mode, #header{fields = F} = Hdr, {_MsgType,_} = Msg) ->\n"
     "  Hdr1 = Hdr#header{fields = F#{'BeginString' => ?FIX_BEGIN_STR}},\n"
-    "  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Hdr1, Msg).\n"
+    "  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Hdr1, Msg).\n\n"
+    "split(Mode, Bin) -> split(Mode, Bin, []).\n\n"
+    "-spec split(nif|native, binary(), [binary|full]) ->\n"
+    "        [{atom(), binary()|{integer(),integer()}, any(), {integer(),integer()}}].\n"
+    "split(Mode, Bin, Opts) ->\n"
+    "  fix_util:split(Mode, ?FIX_VARIANT, Bin, Opts).\n"
   ]),
   %%if Variant == "" ->
   %%  ok;
@@ -387,8 +394,8 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
   [
     "-module(", FNm, ").\n"
-    "-export([decode_msg/2, decode_msg_header/1]).\n\n",
-    if State#state.var_sfx == "" ->
+    "-export([decode_msg/2, decode_msg_header/1, field/1]).\n\n",
+    if SFX == "" ->
       ["-include(\"fix.hrl\").\n"
        "-include(\"", add_variant_suffix("fix_adm_msgs.hrl", State), "\").\n"
        "-include(\"", add_variant_suffix("fix_app_msgs.hrl", State), "\").\n"];
@@ -398,6 +405,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     "\n"
     "-define(MAP_SET(_R, _M, _F, _V), _R#_M{fields = (R#_M.fields)#{_F => _V}}).\n"
     "\n"
+    "field(N) -> fix_fields", SFX, ":field(N).\n\n"
     "decode_msg_header(Msg) ->\n"
     "  decode_msg_header(Msg, #header{}, 0, []).\n"
     "\n",

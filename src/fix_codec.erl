@@ -36,6 +36,8 @@ decode(Mode, Bin, Options) ->
 decode(Mode, Bin) ->
   decode(Mode, Bin, []).
 
+%% Decodes a list of [{Key, Value}] pairs to a FIX message.
+%% Use after splitting the message with split/1
 decode_msg(Msg) when is_list(Msg) ->
   fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).
 
@@ -43,3 +45,10 @@ decode_msg(Msg) when is_list(Msg) ->
 encode(Mode, #header{fields = F} = Hdr, {_MsgType,_} = Msg) ->
   Hdr1 = Hdr#header{fields = F#{'BeginString' => ?FIX_BEGIN_STR}},
   fix_util:encode(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Hdr1, Msg).
+
+split(Mode, Bin) -> split(Mode, Bin, []).
+
+-spec split(nif|native, binary(), [binary|full]) ->
+        [{atom(), binary()|{integer(),integer()}, any(), {integer(),integer()}}].
+split(Mode, Bin, Opts) ->
+  fix_util:split(Mode, ?FIX_VARIANT, Bin, Opts).

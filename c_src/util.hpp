@@ -1313,7 +1313,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         auto is_length   = field->type() == FieldType::LENGTH && code != 9;
         next_data_length = IS_UNLIKELY(is_length) ? ival : -1;
 
-        value = enif_make_long(env, ival);
+        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
+                                    : enif_make_long(env, ival);
         break;
       }
 
