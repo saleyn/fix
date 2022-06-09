@@ -62,21 +62,18 @@ split2(DecoderMod, Bin, Delim) when is_atom(DecoderMod) ->
   case binary:match(Bin, <<Delim, "9=">>) of
     {I,N} when byte_size(Bin) > I+N+10 ->
       M = I+N,
-      try
-        %% NOTE: Len includes delimiter
-        {Len, Val} = fix_nif:bin_to_integer(Bin, [{offset, M}, {delim, Delim}]),
-        Size = M+Len + Val + 8,  %% 9=XXXX|....|10=XXX|
-        case Bin of
-          <<B:Size/binary, _/binary>> ->
-            L = [binary:split(KV, <<"=">>)
-                 || KV <- binary:split(B, <<Delim>>, [global, trim])],
-            Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V, Bin) end,
-            {ok, Size, lists:map(Fun, L)};
-          _ ->
-            {more, Size - byte_size(Bin)}
-        end
-      catch _:_ ->
-        {more, 25}
-      end;    _ ->
-      {error, {}}
+      %% NOTE: Len includes delimiter
+      {Len, Val} = fix_nif:bin_to_integer(Bin, [{offset, M}, {delim, Delim}]),
+      Size = M+Len + Val + 8,  %% 9=XXXX|....|10=XXX|
+      case Bin of
+        <<B:Size/binary, _/binary>> ->
+          L = [binary:split(KV, <<"=">>)
+                || KV <- binary:split(B, <<Delim>>, [global, trim])],
+          Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V) end,
+          {ok, Size, lists:map(Fun, L)};
+        _ ->
+          {more, Size - byte_size(Bin)}
+      end;
+    _ ->
+      {more, 25}
   end.
