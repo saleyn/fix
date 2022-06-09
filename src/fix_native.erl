@@ -20,8 +20,8 @@ split(DecoderMod, Bin = <<"8=FIX", _/binary>>) ->
     _     -> {error, {missing_soh, 0, 8}}
   end.
 
-split(DecoderMod, Bin,  1) -> split2(DecoderMod, Bin,  1, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^\1]+)\\1">>))));
-split(DecoderMod, Bin, $|) -> split2(DecoderMod, Bin, $|, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^|]+)\\|">>)))).
+split(DecoderMod, Bin,  1) -> split2(DecoderMod, Bin,  1);
+split(DecoderMod, Bin, $|) -> split2(DecoderMod, Bin, $|).
 
 decode_field(DecoderMod, T={_,_}, V={_,_}, Bin) ->
   Tag = binary:part(Bin, T),
@@ -58,7 +58,7 @@ encode_field(Codec, Tag, Val) when is_atom(Codec), is_atom(Tag) ->
   {_Num, _Type, Fun} = Codec:field_tag(Tag),
   Fun(Val).
 
-split2(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) ->
+split2(DecoderMod, Bin, Delim) when is_atom(DecoderMod) ->
   case binary:match(Bin, <<Delim, "9=">>) of
     {I,N} when byte_size(Bin) > I+N+10 ->
       M = I+N,
@@ -68,7 +68,8 @@ split2(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) 
         Size = M+Len + Val + 8,  %% 9=XXXX|....|10=XXX|
         case Bin of
           <<B:Size/binary, _/binary>> ->
-            {match, L} = re:run(B, Regex, [{capture, all_but_first}, global]),
+            L = [binary:split(KV, <<"=">>)
+                 || KV <- binary:split(B, <<Delim>>, [global, trim])],
             Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V, Bin) end,
             {ok, Size, lists:map(Fun, L)};
           _ ->

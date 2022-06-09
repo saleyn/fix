@@ -1353,16 +1353,17 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
       case ParserState::BINARY: {
         // This field should have preceeded by the LENGTH integer field
         // that would have set the "next_data_length" variable
-        if (next_data_length < 0) [[unlikely]]
-          return make_error(env, "binary_missing_len", ptr-begin, code);
-
-        p += next_data_length;
-        next_data_length = -1;
+        if (next_data_length < 0)
+          while (p < end && *p != soh) ++p;
+        else {
+          p += next_data_length;
+          next_data_length = -1;
+        }
 
         if (p >= end || *p != soh)
           return make_error(env, "binary", ptr - begin, code);
 
-        const auto   len = p - ptr;
+        const auto len = p - ptr;
 
         if (ret_binary) {
           auto data = enif_make_new_binary(env, len, &value);
