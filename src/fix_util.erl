@@ -49,7 +49,7 @@ timestamp(EpochUSecs) when is_integer(EpochUSecs) ->
      | error.
 decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
   try
-    case split(Mode, FixVariant, Bin, Options) of
+    case do_split(Mode, CodecMod, FixVariant, Bin, Options) of
       {ok, MsgLen, Msg} when MsgLen == byte_size(Bin) ->
         {ok, <<>>, decode_msg(CodecMod, Msg)};
       {ok, MsgLen, Msg} ->
@@ -60,13 +60,8 @@ decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
       {more, _Size} = R ->
         R
     end
-  catch
-    error:Error:StackTrace ->
-      ?LOG_ERROR(#{info  => "Failed to decode FIX msg",
-                   msg   => dump(Bin),
-                   error => Error,
-                   stack => StackTrace}),
-      error(invalid_fix)
+  catch error:Error:ST ->
+    erlang:raise(error, {"Failed to decode FIX msg", Error, Bin}, ST)
   end.
 
 decode_msg(CodecMod, Msg) when is_atom(CodecMod), is_list(Msg) ->
@@ -170,8 +165,11 @@ undump(Bin) when is_binary(Bin) ->
 dumpstr(Encoded) ->
   io:format("~s~n", [binary_to_list(dump(Encoded))]).
 
-split(nif,    Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
-split(native, Variant, Bin, Opts) -> fix_native:split(Variant, Bin, Opts).
+do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
+do_split(native, CodecMod, _Variant, Bin,_Opts) -> fix_native:split(CodecMod, Bin).
+
+split(nif,    Variant,  Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
+split(native, CodecMod, Bin,_Opts) -> fix_native:split(CodecMod, Bin).
 
 try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, $Y);
 try_encode_val(ID, bool,   false)                -> encode_tagval(ID, $N);
