@@ -174,10 +174,6 @@ bin_to_integer(_Value) ->
 bin_to_integer(_Value, _Options) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
--spec decode_timestamp(binary()) -> integer().
-decode_timestamp(_Value) ->
-  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
-
 %% @doc Substitute formatted date/time in a string using C strftime() function.
 -spec strftime(Fmt::string() | binary(), integer()) -> string() | binary().
 strftime(_Format, _NowSecs) ->
@@ -202,6 +198,13 @@ pathftime(_Format, _NowSecs) ->
 -spec pathftime(Fmt::string() | binary(), NowSecs::integer(), utc | local) ->
   string() | binary().
 pathftime(_Format, _NowSecs, _Utc) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+%% @doc Convert a UTC timestamp to integer seconds from UNIX epoch.
+%% Timestamp can be in the form "YYYYMMDD-hh:mm:ss[.ttt[ttt]]".  Throws
+%% `badarg' on failure.
+-spec decode_timestamp(binary()) -> integer().
+decode_timestamp(_Value) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
 %% @doc Convert timestamp to integer micro-/milli-seconds from UNIX epoch.
@@ -270,8 +273,9 @@ bin_to_integer_test() ->
 encode_decode_timestamp_test() ->
   ?assertEqual(1646002459113369, decode_timestamp(<<"20220227-22:54:19.113369">>)),
   ?assertEqual(1646002459113369, decode_timestamp(<<"20220227-22:54:19.113369">>, utc)),
-  ?assertEqual(1646020459113369, decode_timestamp(<<"20220227-17:54:19.113369">>, local)),
-  ?assertEqual(<<"20220227-22:54:19.113369">>, encode_timestamp(decode_timestamp(<<"20220227-22:54:19.113369">>))),
+  ?assertEqual(1646020459113369, decode_timestamp(<<"20220227-22:54:19.113369">>, local)),
+  ?assertEqual(1646002459113369, decode_timestamp(<<"20220227-17:54:19.113369">>, local)),
+  ?assertEqual(<<"20220227-22:54:19.113369">>, encode_timestamp(decode_timestamp(<<"20220227-22:54:19.113369">>), utc, us)),
   ?assertEqual(<<"20220227-22:54:19.113369">>, fix_nif:encode_timestamp(1646002459113369, utc,   us)),
   ?assertEqual(<<"20220227-22:54:19.113">>,    fix_nif:encode_timestamp(1646002459113369, utc,   ms)),
   ?assertEqual(<<"20220227-22:54:19">>,        fix_nif:encode_timestamp(1646002459113369, utc,   sec)),
@@ -298,80 +302,81 @@ split_and_checksum_test() ->
   HBeatR    = fix_util:undump(HBeatP),
   ?assertEqual(175, fix_nif:checksum(HBeatP)),
   ?assertEqual(175, fix_nif:checksum(HBeatR)),
-  Bn2       = fix_nif:update_checksum(HBeatR),
+  Bn2       = fix_util:dump(fix_nif:update_checksum(HBeatR)),
   %%<<"175">> = binary:part(Bn2, {76,3}),
   %% NOTE: destructive update of the 10=xxx field in the prior call:
-  ?assertEqual(HBeatR, <<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5|52=20190605-11:57:29.363|10=175|">>),
+  ?assertEqual(HBeatR, <<"8=FIX.4.0",1,"9=58",1,"35=0",1,"49=BuySide",1,"56=SellSide",1,"34=5",1,"52=20190605-11:57:29.363",1,"10=175",1>>),
   ?assertEqual(Bn2,    <<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5|52=20190605-11:57:29.363|10=175|">>),
-
-  Fix = fix_variant:new(default),
-
-  ?assertEqual({error,{missing_tag9,0,0}},
-    Fix:split(<<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5">>)),
-  ?assertEqual({more, 33},
-    Fix:split(<<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5">>, [{delim, $|}])),
-  ?assertEqual({more, 33},
-    Fix:split(fix_util:undump(<<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5">>))),
-
-  ?assertEqual({ok,80,
-    [ {'BeginString',8,{2,7}},
-      {'BodyLength',9,58},
-      {'MsgType',35,'Heartbeat'},
-      {'SenderCompID',49,{23,7}},
-      {'TargetCompID',56,{34,8}},
-      {'MsgSeqNum',34,5},
-      {'SendingTime',52,{51,21}},
-      {'CheckSum',10,{76,3}}]},
-    Fix:split(Bn2, [{delim,$|}])),
-
-  ?assertEqual({ok,80,
-    [ {'BeginString',8,{2,7}},
-      {'BodyLength',9,58},
-      {'MsgType',35,'Heartbeat'},
-      {'SenderCompID',49,{23,7}},
-      {'TargetCompID',56,{34,8}},
-      {'MsgSeqNum',34,5},
-      {'SendingTime',52,{51,21}}
-    ]},
-    Fix:split(HBeatR)),
-
-  ?assertEqual({ok,80,
-    [ {'BeginString',8,<<"FIX.4.0">>},
-      {'BodyLength',9,58},
-      {'MsgType',35,'Heartbeat'},
-      {'SenderCompID',49,<<"BuySide">>},
-      {'TargetCompID',56,<<"SellSide">>},
-      {'MsgSeqNum',34,5},
-      {'SendingTime',52,<<"2019005-11:57:29.363">>},
-      {'CheckSum',10,<<"175">>}]},
-    Fix:split(HBeatR, [binary])),
-
-  BinP = <<"8=FIX.4.4|9=22|35=A|93=8|89=ABCD1234|384=2|372=ABC|"
-           "385=S|372=EFG|385=R|94=0|10=999|">>,
-  Bin  = fix_util:undump(BinP),
-
-  ?assertEqual({ok,83,
-    [ {'BeginString',<<"FIX.4.4">>,8,{2,7}},
-      {'BodyLength',61,9,{12,2}},
-      {'MsgType','Logon',35,{18,1}},
-      {'SignatureLength',8,93,{23,1}},
-      {'Signature',<<"ABCD1234">>,89,{28,8}},
-      {'NoMsgTypes',2,384,{41,1}},
-      {'RefMsgType',<<"ABC">>,372,{47,3}},
-      {'MsgDirection','Send',385,{55,1}},
-      {'RefMsgType',<<"EFG">>,372,{61,3}},
-      {'MsgDirection','Receive',385,{69,1}},
-      {'EmailType','New',94,{74,1}},
-      {'CheckSum',<<"226">>,10,{79,3}}]},
-    Fix:split(<<"8=FIX.4.4|9=61|35=A|93=8|89=ABCD1234|384=2|372=ABC|385=S|372=EFG|385=R|94=0|10=226|">>,
-                       [binary, full])),
   ok.
 
-tag_to_field_test() ->
-  Fix = fix_variant:new(default),
-  ?assertEqual('CheckSum', Fix:tag_to_field(10)),
-  ?assertEqual('CheckSum', Fix:tag_to_field("10")),
-  ?assertEqual('CheckSum', Fix:tag_to_field(<<"10">>)),
-  ok.
+  % Fix = fix_variant:new(default),
+
+  % ?assertEqual({error,{missing_tag9,0,0}},
+  %   Fix:split(<<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5">>)),
+  % ?assertEqual({more, 33},
+  %   Fix:split(<<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5">>, [{delim, $|}])),
+  % ?assertEqual({more, 33},
+  %   Fix:split(fix_util:undump(<<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5">>))),
+
+  % ?assertEqual({ok,80,
+  %   [ {'BeginString',8,{2,7}},
+  %     {'BodyLength',9,58},
+  %     {'MsgType',35,'Heartbeat'},
+  %     {'SenderCompID',49,{23,7}},
+  %     {'TargetCompID',56,{34,8}},
+  %     {'MsgSeqNum',34,5},
+  %     {'SendingTime',52,{51,21}},
+  %     {'CheckSum',10,{76,3}}]},
+  %   Fix:split(Bn2, [{delim,$|}])),
+
+  % ?assertEqual({ok,80,
+  %   [ {'BeginString',8,{2,7}},
+  %     {'BodyLength',9,58},
+  %     {'MsgType',35,'Heartbeat'},
+  %     {'SenderCompID',49,{23,7}},
+  %     {'TargetCompID',56,{34,8}},
+  %     {'MsgSeqNum',34,5},
+  %     {'SendingTime',52,{51,21}}
+  %   ]},
+  %   Fix:split(HBeatR)),
+
+  % ?assertEqual({ok,80,
+  %   [ {'BeginString',8,<<"FIX.4.0">>},
+  %     {'BodyLength',9,58},
+  %     {'MsgType',35,'Heartbeat'},
+  %     {'SenderCompID',49,<<"BuySide">>},
+  %     {'TargetCompID',56,<<"SellSide">>},
+  %     {'MsgSeqNum',34,5},
+  %     {'SendingTime',52,<<"2019005-11:57:29.363">>},
+  %     {'CheckSum',10,<<"175">>}]},
+  %   Fix:split(HBeatR, [binary])),
+
+  % BinP = <<"8=FIX.4.4|9=22|35=A|93=8|89=ABCD1234|384=2|372=ABC|"
+  %          "385=S|372=EFG|385=R|94=0|10=999|">>,
+  % Bin  = fix_util:undump(BinP),
+
+  % ?assertEqual({ok,83,
+  %   [ {'BeginString',<<"FIX.4.4">>,8,{2,7}},
+  %     {'BodyLength',61,9,{12,2}},
+  %     {'MsgType','Logon',35,{18,1}},
+  %     {'SignatureLength',8,93,{23,1}},
+  %     {'Signature',<<"ABCD1234">>,89,{28,8}},
+  %     {'NoMsgTypes',2,384,{41,1}},
+  %     {'RefMsgType',<<"ABC">>,372,{47,3}},
+  %     {'MsgDirection','Send',385,{55,1}},
+  %     {'RefMsgType',<<"EFG">>,372,{61,3}},
+  %     {'MsgDirection','Receive',385,{69,1}},
+  %     {'EmailType','New',94,{74,1}},
+  %     {'CheckSum',<<"226">>,10,{79,3}}]},
+  %   Fix:split(<<"8=FIX.4.4|9=61|35=A|93=8|89=ABCD1234|384=2|372=ABC|385=S|372=EFG|385=R|94=0|10=226|">>,
+  %                      [binary, full])),
+  % ok.
+
+% tag_to_field_test() ->
+%   Fix = fix_variant:new(default),
+%   ?assertEqual('CheckSum', Fix:tag_to_field(10)),
+%   ?assertEqual('CheckSum', Fix:tag_to_field("10")),
+%   ?assertEqual('CheckSum', Fix:tag_to_field(<<"10">>)),
+%   ok.
 
 -endif.

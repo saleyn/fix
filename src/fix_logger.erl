@@ -17,7 +17,6 @@
 
 %% External exports
 -export([start_link/3, start/3, close/1, log/3, log/4, log/5, write/2, filename/1]).
--export([split_time/2]).
 
 %% gen_server callbacks
 -export([
@@ -29,33 +28,23 @@
 
 -compile({no_auto_import,[now/0]}).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -include_lib("kernel/include/file.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--record(state, {
-  fd,                             %% term(), file descriptor
-  prefix=""  :: string(),         %% Prefix for system log messages
-  fname      :: string(),         %% file name
-  fname_mask :: string(),         %% file name source mask
-  %% Execute this fun or write to file on creating a new file
-  on_new  :: fun((Filename::string(), Now::erlang:timestamp()) ->
-                  {erlang:timestamp(), string()|binary()})
-            | string() | binary(),
-  date    :: erlang:date(),       %% Last written date
-  sz_chk=0:: integer(),           %% Last file size checking time
-  rotate  :: none|date|{size, integer()},  %% File rotation
-  keep_files=5 :: integer(),      %% Keep this number of rotated files
-  vars    :: [{atom(), list()}],  %% Bindings for filename
-  utc     :: boolean()            %% Write time in UTC timezone
-}).
-
 -define(FILE_OPTS, [append, raw, binary, {delayed_write, 4096, 500}]).
 
+-type vars()    :: [{atom, list()|binary()}].
+
 -type options() :: #{
-  vars   => [{atom(), string()}],
-  on_new => on_new(),
-  rotate => date|{size, integer()}|none,
-  utc    => boolean()
+  vars    => vars(),
+  on_new  => on_new(),
+  dir_fun => fun((in|out|undefined) -> binary()|list()),
+  rotate  => date|{size, integer()}|none,
+  utc     => boolean()
 }.
 %% Options passed to logger at startup:
 %% <dl>
@@ -64,10 +53,18 @@
 %%       when Filename = "/tmp/%Y%m%d-krx-${type}.log"
 %%   </dd>
 %% <dt>on_new</dt>
-%%   <dd>Content to write to newly created file. It can be a string, or a
-%%       binary
+%%   <dd>Content to write to newly created file. It can be a string, a
+%%       binary, or a function that returns binary:
+%%       `fun((Filename::string()) -> string())'. In the last case the returned
+%%       value may contain variable names and date/time templates (similar to
+%%       the ones used in defining a filename), which will be substituted using
+%%       current time, and values passed in the `vars' option.
 %%   </dd>
-%% </dl>
+%% <dt>dir_fun</dt>
+%%   <dd>Direction-formatting function `fun(in|out|undefined) -> string()'.
+%%       By default the direction is printed as: `" <- "' for `in', `" -> "'
+%%       for `out', and `"    "' for `undefined'.
+%%   </dd>
 %% <dt>{rotate, Rotate}</dt>
 %%   <dd>Rotate logs by date (Rotate :: `date') or by file size
 %%       (Rotate :: {size, integer()})
@@ -77,7 +74,25 @@
 %% <dt>utc</dt><dd>Write time in UTC timezone</dd>
 %% </dl>
 
--type on_new() :: list()|binary().
+-type on_new() ::
+  fun((Filename::string()) -> string()|binary()) | string()| binary().
+-type dir_fun() :: fun((in|out|undefined) -> string()).
+
+-record(state, {
+  fd,                                           %% term(), file descriptor
+  prefix=""     :: string(),                    %% Prefix for logged messages
+  fname         :: string(),                    %% file name
+  fname_mask    :: string(),                    %% file name source mask
+  %% Execute this fun or write to file on creating a new file
+  on_new        :: on_new(),
+  dir_fun       :: undefined|dir_fun(),         %% Direction-formatting lambda
+  date          :: erlang:date(),               %% Last written date
+  sz_chk=0      :: integer(),                   %% Last file size checking time
+  rotate        :: none|date|{size, integer()}, %% File rotation
+  keep_files=5  :: integer(),                   %% Max number of rotated files
+  vars          :: vars(),                      %% Bindings for filename
+  utc           :: boolean()                    %% Write time in UTC timezone
+}).
 
 %%%-----------------------------------------------------------------------------
 %%% External functions
@@ -123,7 +138,8 @@ filename(Logger) ->
 %% @doc Save `Data' to log file. The call is asynchronous.
 %% @end
 %%------------------------------------------------------------------------------
--spec log(pid(), in|out|undefined, list()|binary()|fun(() -> list()|binary())) -> ok.
+-spec log(pid(), in|out|undefined|string(),
+          list()|binary()|fun(() -> list()|binary())) -> ok.
 log(Logger, Dir, Data) when is_atom(Dir) ->
   log2(Logger, {op(Data), now(), direction(Dir), Data});
 log(Logger, Fmt, Args) when is_list(Fmt), is_list(Args) ->
@@ -138,16 +154,17 @@ log(Logger, Dir, Fun, Args) when is_function(Fun, 1), is_list(Args) ->
 log(Logger, Dir, Fmt, Args) when is_list(Fmt), is_list(Args) ->
   log2(Logger, {log, now(), direction(Dir), Fmt, Args}).
 
-%% @doc Write verbatim data to log file
-write(Logger, Data) ->
-    log2(Logger, {log, undefined, undefined, Data}).
-
 %%------------------------------------------------------------------------------
 %% @doc Save result of `io_lib:format(Fmt, Args)' to file.
 %% @end
 %%------------------------------------------------------------------------------
+-spec log(pid()|atom(), in|out|undefined, string(),list(), MS::integer()) -> ok.
 log(Logger, Dir, Fmt, Args, Now) ->
     log2(Logger, {log, now(Now), direction(Dir), Fmt, Args}).
+
+%% @doc Write verbatim data to log file
+write(Logger, Data) ->
+  log2(Logger, {log, undefined, undefined, Data}).
 
 %%%------------------------------------------------------------------------
 %%% Callback functions from gen_server
@@ -168,27 +185,44 @@ log(Logger, Dir, Fmt, Args, Now) ->
         {stop, Reason :: any()}.
 init(Opts) ->
   try
-    File    = maps:get(filename,   Opts),
+    File    = to_list(maps:get(filename, Opts)),
     Vars    = maps:get(vars,       Opts, []),
     OnNew   = maps:get(on_new,     Opts, ""),
+    Dir     = maps:get(dir_fun,    Opts, undefined),
     UTC     = maps:get(utc,        Opts, false),
     Rotate  = maps:get(rotate,     Opts, date),
     Keep    = maps:get(keep_files, Opts, 5),
     Pfx     = case maps:get(prefix,Opts) of
                 none -> "";
-                Str  -> Str ++ ": "
+                Str  -> to_list(Str)
               end,
-    is_list(OnNew)
-      orelse  is_binary(OnNew)
-      orelse  throw({invalid_option, on_new, OnNew}),
+    (is_list(Vars)
+      andalso lists:foldl(fun({K,V}, A) ->
+                            A and is_atom(K) and is_string(V)
+                          end, true, Vars))
+      orelse  throw("vars must be of type [{atom, string|binary}]"),
+    is_string(OnNew)
+      orelse (is_function(OnNew, 1) andalso is_string(OnNew("Test")))
+      orelse  throw("on_new must be string|list|fun/1"),
+    Dir == undefined
+      orelse (is_function(Dir, 1)
+              andalso (is_list(Dir(in))        orelse is_binary(Dir(in)))
+              andalso (is_list(Dir(out))       orelse is_binary(Dir(out)))
+              andalso (is_list(Dir(undefined)) orelse is_binary(Dir(undefined))))
+      orelse  throw("dir_fun must be a fun/1 that formats in|out|undefined"),
+    (is_integer(Keep) andalso Keep >= 0)
+      orelse  throw("keep_files option must be integer > 0"),
     Rotate == date
       andalso string:find(File, "%d") == nomatch
       andalso throw("log filename must contain \"%d\""),
-    {ok, #state{fname_mask=File, on_new=OnNew, utc=UTC,
-                rotate=Rotate, vars=Vars, keep_files=Keep, prefix=Pfx}}
-  catch _:Err:ST ->
-    ?LOG_ERROR(#{info => "Error starting logger", error => Err, stack => ST}),
-    {stop, {Err, ST}}
+
+    Vars1 = [{K, to_list(V)} || {K,V} <- Vars],
+
+    {ok, #state{fname_mask=File, on_new=OnNew, utc=UTC, dir_fun=Dir,
+                rotate=Rotate, vars=Vars1, keep_files=Keep, prefix=Pfx}}
+  catch throw:Err:ST ->
+    Error = "Error starting logger: " ++ Err,
+    erlang:raise(error, Error, ST)
   end.
 
 %%------------------------------------------------------------------------------
@@ -300,8 +334,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%-----------------------------------------------------------------------------
 
-now() -> erlang:system_time(millisecond).
-
 log2(Logger, Details) when is_atom(Logger) ->
   case whereis(Logger) of
     Pid when is_pid(Pid) ->
@@ -331,11 +363,18 @@ direction(out)       -> out;
 direction(undefined) -> undefined.
 
 now(undefined)  -> undefined;
-now(T) when is_tuple(T) -> T.
+now(T) when is_integer(T), T > 1577836800000 -> T.  %% 2020-01-01
 
-dir(in)         -> " <- ";
-dir(out)        -> " -> ";
-dir(undefined)  -> "".
+now() -> erlang:system_time(millisecond).
+
+dir(undefined, Dir) ->
+  case Dir of
+    in  -> " <- ";
+    out -> " -> ";
+    _   -> "    "
+  end;
+dir(F, Dir) when is_function(F, 1) ->
+  F(Dir).
 
 %%------------------------------------------------------------------------------
 %% @doc  Save `Data' to a log file.  Opens the log file if it's not already
@@ -347,11 +386,17 @@ dir(undefined)  -> "".
         NewState::#state{}.
 log_to_file(State, Now, Dir, Data) ->
   case maybe_open_file(State, Now) of
-    {true, DateTime, State1} ->
-      State2 = safe_write_file(DateTime, header, State#state.on_new, State1),
+    {true, DateTime={DT,_}, #state{on_new=OnNew, fname=FN, vars=Vars} = S1} ->
+      Header = if
+        is_function(OnNew, 1)            -> OnNew(FN);
+        is_list(OnNew); is_binary(OnNew) -> OnNew;
+        true                             -> ""
+      end,
+      Hdr = replace(to_list(Header), DT, Vars),
+      State2 = safe_write_file(DateTime, header, Hdr, S1),
       safe_write_file(DateTime, Dir, Data, State2);
-    {false, DateTime, State1} ->
-      safe_write_file(DateTime, Dir, Data, State1)
+    {false, DateTime, S1} ->
+      safe_write_file(DateTime, Dir, Data, S1)
   end.
 
 maybe_open_file(#state{fd=undefined}=S, Now) ->
@@ -359,7 +404,7 @@ maybe_open_file(#state{fd=undefined}=S, Now) ->
   N  = filelib:file_size(FN),
   case file:open(FN, ?FILE_OPTS) of
   {ok, NewDev} ->
-    {{Date,_},_} = Time = split_time(now(), S#state.utc),
+    {{Date,_},_} = Time = split_time(Now, S#state.utc),
     Created = N == 0,
     Created andalso ?LOG_INFO("~screated new log file ~s", [S#state.prefix, FN]),
     {Created, Time, S#state{fd=NewDev, fname=FN, date=Date}};
@@ -395,10 +440,10 @@ safe_write_file(_DT, header, H, State) when H==""; H == <<"">>; H==undefined ->
   State;
 safe_write_file(_DT, header, Data, State) ->
   do_write(State, Data);
-safe_write_file(DateTime, Dir, Data, State) ->
-  Pfx  = format_time(DateTime),
-  DirL = dir(Dir),
-  do_write(State, [Pfx, DirL, Data]).
+safe_write_file(DateTime, Dir, Data, #state{prefix=Pfx, dir_fun=DF} = State) ->
+  Time = format_time(DateTime),
+  DirL = dir(DF, Dir),
+  do_write(State, [Time, Pfx, DirL, Data]).
 
 do_write(State = #state{fd=Dev, prefix=Pfx}, Data) ->
   case file:write(Dev, Data) of
@@ -416,9 +461,9 @@ do_write(State = #state{fd=Dev, prefix=Pfx}, Data) ->
 %% @end
 %%------------------------------------------------------------------------------
 -spec filename(Now::integer(), #state{}) -> string().
-filename(Now,  #state{fname_mask=Fname, utc=UTC, prefix=Pfx, vars=Bindings}) ->
-  {{{Y,M,D},_},_} = split_time(Now, UTC),
-  File = replace(Fname, {Y,M,D}, Bindings),
+filename(Now, #state{fname_mask=Fname, utc=UTC, prefix=Pfx, vars=Bindings}) ->
+  {DT,_} = split_time(Now, UTC),
+  File = replace(Fname, DT, Bindings),
   case filelib:ensure_dir(File) of
     ok ->
       File;
@@ -427,17 +472,12 @@ filename(Now,  #state{fname_mask=Fname, utc=UTC, prefix=Pfx, vars=Bindings}) ->
       erlang:error({log_file, File, err})
   end.
 
-replace(File, {Y,M,D}, Bindings) ->
+replace(File, {{Y,M,D},{HH,MM,SS}}, Bindings) ->
   File1 = lists:foldl(
     fun({S,I}, A) -> lists:append(string:replace(A, S, i2lp(I), all)) end,
     File,
-    [{"%Y", Y}, {"%m", M}, {"%d", D}]),
+    [{"%Y",Y}, {"%m",M}, {"%d",D}, {"%H",HH}, {"%M",MM}, {"%S",SS}]),
   env:subst_env_path(File1, Bindings).
-
--spec time(MSec::integer(), UTC::boolean()) -> list().
-time(Now, UTC) ->
-  DateTimeWithMsec = split_time(Now, UTC),
-  format_time(DateTimeWithMsec).
 
 format_time({{{Y,M,D}, {H,Mi,S}}, Msec}) ->
   [integer_to_binary(Y), i2b(M), i2b(D), $-,
@@ -451,6 +491,11 @@ split_time(Now, UTC) when is_integer(Now) ->
     UTC  -> {CalTime, Msec};
     true -> {erlang:universaltime_to_localtime(CalTime), Msec}
   end.
+
+is_string(S) -> is_list(S) orelse is_binary(S).
+
+to_list(S) when is_list(S)   -> S;
+to_list(S) when is_binary(S) -> binary_to_list(S).
 
 i2b(I) when I < 10    -> <<$0, ($0+I)>>;
 i2b(I)                -> integer_to_binary(I).
@@ -497,7 +542,7 @@ rotate_files(RotType, #state{prefix=Pfx, keep_files=Keep, fname_mask=Fname}=S) -
       case string:find(Fname, "%d") of
         nomatch ->
           OldFile = S#state.fname,
-          NewFile = replace("%Y%m%d." ++ OldFile, date(), []),
+          NewFile = replace("%Y%m%d." ++ OldFile, {date(),time()}, []),
           case file:rename(OldFile, NewFile) of
             ok ->
               ?LOG_NOTICE("~srotated log file: ~s -> ~s", [Pfx, OldFile, NewFile]);
@@ -512,3 +557,43 @@ rotate_files(RotType, #state{prefix=Pfx, keep_files=Keep, fname_mask=Fname}=S) -
           ok
       end
   end.
+
+%%%----------------------------------------------------------------------------
+%%% Test Cases
+%%%----------------------------------------------------------------------------
+
+-ifdef(EUNIT).
+
+log_test() ->
+  DTime   = {{2022,1,2}, {3,4,5}},
+  Prefix  = "|SRC:DST|",
+  DirFun  = fun
+              (in)  -> "I|";
+              (out) -> "O|";
+              (_)   -> " |"
+            end,
+  Opts    = #{rotate => none, utc=>true, prefix => Prefix, dir_fun => DirFun,
+              on_new => fun(F) -> "## New file: %Y%m%d\n" end},
+  Filenm  = "/tmp/%Y%m%d.test.fix.log",
+  FName   = replace(Filenm, DTime, []),
+  file:delete(FName),
+
+  Logger  = fix_logger:start_link(flt, Filenm, Opts),
+  Now     = erlang:universaltime_to_posixtime(DTime)*1000,
+  fix_logger:log(flt, out, "Test\n", [], Now),
+  FN = fix_logger:filename(flt),
+  fix_logger:close(flt),
+
+  ?assertEqual(FName, FN),
+  ?assert(filelib:is_regular(FN)),
+
+  {{Y,M,D},{HH,MM,SS}} = DTime,
+  {ok, Bin} = file:read_file(FN),
+  Expect    = lists:flatten(io_lib:format(
+    "## New file: ~w~.2.0w~.2.0w\n"
+    "~w~.2.0w~.2.0w-~.2.0w:~.2.0w:~.2.0w.000~sO|Test\n",
+    [Y,M,D,Y,M,D,HH,MM,SS, Prefix])),
+
+  ?assertEqual(Expect, to_list(Bin)).
+
+-endif.
