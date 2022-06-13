@@ -13,6 +13,7 @@
          encode/5, dumpstr/1, dump/1, undump/1, split/4]).
 -export([try_encode_val/3, try_encode_group/3]).
 -export([encode_tagval/2,  encode_tagval/3]).
+-export([find_variants/0]).
 
 -compile({no_auto_import,[now/0]}).
 -compile({parse_transform,etran}).
@@ -165,6 +166,57 @@ undump(Bin) when is_binary(Bin) ->
 dumpstr(Encoded) ->
   io:format("~s~n", [binary_to_list(dump(Encoded))]).
 
+%% @doc Find all known FIX variants `*.so' NIF libraries.
+-spec find_variants() -> [string()].
+find_variants() ->
+  Priv = filename:dirname(code:which(?MODULE)) ++ "/../priv",
+
+  %% Get the list of supported FIX variants to load. These should be either
+  %% directory names containing `*.so' files, or the full `*.so' file names
+  %% or application names in which the `priv' dirs will be searched for
+  %% '*.so' files:
+  Apps   = application:which_applications(),
+  Vars   = application:get_env(fix, fix_variants, get_variants_from_env()),
+  lists:foldl(fun(V, S) ->
+    Msk  =
+      if is_atom(V) ->
+        case lists:keymember(V, 1, Apps) of
+          true ->
+            case code:priv_dir(V) of
+              {error, _} ->
+                throw("Undefined priv directory of application: ~w", [V]);
+              Dir ->
+                filename:join(filename:absname(Dir), "fix_fields*.so")
+            end;
+          false ->
+            throw("Fix variant application '~w' is not known!", [V]) 
+        end;
+      is_list(V); is_binary(V) ->
+        IsDir   = filelib:is_dir(V),
+        IsFile  = filelib:is_file(V),
+        Val     = iif(is_binary(V), binary_to_list(V), V),
+        if IsDir ->
+          filename:join(Val, "fix_fields*.so");
+        IsFile ->
+          Val;
+        true ->
+          throw("File/Dir name '~s' not found!", [Val])
+        end;
+      true ->
+        throw("Invalid argument in fix.fix_variants: ~p", [V])
+      end,
+    case filelib:wildcard(Msk) of
+      [] when V /= Priv ->
+        logger:warning("No shared object files found matching name: ~s", [Msk]),
+        S;
+      [] ->
+        S;
+      Names ->
+        Names ++ S
+    end
+  end, [], [Priv | Vars]).
+
+
 do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
 do_split(native, CodecMod, _Variant, Bin,_Opts) -> fix_native:split(CodecMod, Bin).
 
@@ -212,6 +264,23 @@ encode_field(Mod, ID, Val) when is_atom(ID) ->
     {_Num, _Type, Fun}   -> Fun(Val)
   end.
 
+get_variants_from_env() ->
+  case os:getenv("FIX_VARIANTS") of
+    false ->
+      [];
+    Env ->
+      lists:foldl(fun(S,L) ->
+        try
+          A = list_to_existing_atom(S),
+          case lists:keymember(A, 1, application:which_applications()) of
+            true  -> [A | L];
+            false -> L
+          end
+        catch _:_ ->
+          L
+        end
+      end, [], string:split(Env, ":", all))
+  end.
 
 -ifdef(TEST).
 -endif.

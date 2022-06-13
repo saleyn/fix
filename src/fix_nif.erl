@@ -30,94 +30,28 @@
 -compile({parse_transform,  etran}).  % Use parse transforms from etran library
 
 init_nif() ->
-  Priv   = filename:dirname(code:which(?MODULE)) ++ "/../priv",
-  Name   = filename:join(Priv, ?MODULE_STRING),
-
   %% Get the list of supported FIX variants to load. These should be either
   %% directory names containing `*.so' files, or the full `*.so' file names
   %% or application names in which the `priv' dirs will be searched for
   %% '*.so' files:
-  Apps   = application:which_applications(),
-  Vars   = application:get_env(fix, fix_variants, get_variants_from_env()),
   TsType = application:get_env(fix, ts_type,      sec),
 
   lists:member(TsType, [sec, us, ms]) orelse
     throw("Invalid FIX_TS_TYPE=~s (expected: sec|us|ms)", [TsType]),
 
-  Files  = lists:foldl(fun(V, S) ->
-    Msk  =
-      if is_atom(V) ->
-        case lists:keymember(V, 1, Apps) of
-          true ->
-            case code:priv_dir(V) of
-              {error, _} ->
-                throw("Undefined priv directory of application: ~w", [V]);
-              Dir ->
-                filename:join(filename:absname(Dir), "fix_fields*.so")
-            end;
-          false ->
-            case code:priv_dir(fix) of
-              FixDir when is_list(FixDir) ->
-                [_,_|Dir] = lists:reverse(string:split(FixDir, "/", all)),
-                MM = filename:join(atom_to_list(V), "fix_fields*.so"),
-                filename:join(string:join(lists:reverse(Dir), "/"), MM);
-              {error, _} ->
-                throw("Unknown application name: ~w", [V])
-            end
-        end;
-      is_list(V); is_binary(V) ->
-        IsDir   = filelib:is_dir(V),
-        IsFile  = filelib:is_file(V),
-        Val     = iif(is_binary(V), binary_to_list(V), V),
-        if IsDir ->
-          filename:join(Val, "fix_fields*.so");
-        IsFile ->
-          Val;
-        true ->
-          throw("File/Dir name '~s' not found!", [Val])
-        end;
-      true ->
-        throw("Invalid argument in fix.fix_variants: ~p", [V])
-      end,
-    case filelib:wildcard(Msk) of
-      [] when V /= Priv ->
-        logger:warning("No shared object files found matching name: ~s", [Msk]),
-        S;
-      [] ->
-        S;
-      Names ->
-        Names ++ S
-    end
-  end, [], [Priv | Vars]),
-
-  Dbg  = list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")),
-  Dbg > 0 andalso io:format("FIX so files: ~p\n", [Files]),
+  Files  = fix_util:find_variants(),
+  Dbg    = list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")),
+  Dbg > 0  andalso io:format("FIX so files: ~p\n", [Files]),
 
   Args = [{so_files, Files}, {debug, Dbg}, {ts_type, TsType}],
-  Load = erlang:load_nif(Name, Args),
+
+  Priv = filename:dirname(code:which(?MODULE)) ++ "/../priv",
+  Load = erlang:load_nif(filename:join(Priv, ?MODULE_STRING), Args),
 
   case Load of
     ok -> ok;
     {error, {Reason,Text}} ->
       throw("Load fix_nif failed. ~p:~p~n", [Reason, Text])
-  end.
-
-get_variants_from_env() ->
-  case os:getenv("FIX_VARIANTS") of
-    false ->
-      [];
-    Env ->
-      lists:foldl(fun(S,L) ->
-        try
-          A = list_to_existing_atom(S),
-          case lists:keymember(A, 1, application:which_applications()) of
-            true  -> [A | L];
-            false -> L
-          end
-        catch _:_ ->
-          L
-        end
-      end, [], string:split(Env, ":", all))
   end.
 
 %% @doc Parse FIX binary message returning string fields as {Pos,Len} offsets.
