@@ -44,7 +44,7 @@ static const char SOH = 1;
 // FIX data types
 //------------------------------------------------------------------------------
 struct DataType {
-  enum {
+  enum Type {
     UNDEFINED,
     CHAR,
     INT,
@@ -59,6 +59,22 @@ struct DataType {
   DataType(int v) : value(v) {} // This is to enable assignment: DataType t = DataType::INT;
   operator int() const { return value; }
   int value;
+
+  static const char* to_string(unsigned val) {
+    static const char* s_vals[] = {
+      "undefined",
+      "char",
+      "int",
+      "double",
+      "bool",
+      "string",
+      "datetime",
+      "group",
+      "binary",
+    };
+
+    return val < __LAST ? s_vals[val] : s_vals[0];
+  }
 };
 
 // FIX field types found in FIX*.xml specs
@@ -90,6 +106,39 @@ enum FieldType {
   UTCTIMEONLY,
   UTCTIMESTAMP,
 };
+
+static const char* type_to_string(FieldType val) {
+  static const char* s_vals[] = {
+    "undefined",
+    "amt",
+    "boolean",
+    "char",
+    "country",
+    "currency",
+    "data",
+    "dayofmonth",
+    "exchange",
+    "float",
+    "int",
+    "length",
+    "localmktdate",
+    "monthyear",
+    "multiplevaluestring",
+    "numingroup",
+    "percentage",
+    "price",
+    "priceoffset",
+    "qty",
+    "seqnum",
+    "string",
+    "utcdate",
+    "utcdateonly",
+    "utctimeonly",
+    "utctimestamp",
+  };
+
+  return val <= UTCTIMESTAMP ? s_vals[val] : s_vals[0];
+}
 
 enum class TsType {
   Seconds  = 0,
@@ -156,24 +205,25 @@ struct Field {
     DecF                        dec_fun
   );
 
-  int                     debug()        const;
+  int                     debug()           const;
 
-  int                     id()           const { return m_id;           }
-  std::string_view const& name_str()     const { return m_name;         }
-  const char*             name()         const { return m_name.data();  }
-  FieldType               type()         const { return m_type;         }
-  DataType                dtype()        const { return m_dtype;        }
-  ERL_NIF_TERM            atom()         const { return m_atom;         }
-  const int               ch_len()       const { return m_ch_len;       }
-  const char*             len_field()    const { return m_len_field;    }
-  const int               len_field_id() const { return m_len_field_id; }
+  int                     id()              const { return m_id;           }
+  std::string_view const& name_str()        const { return m_name;         }
+  const char*             name()            const { return m_name.data();  }
+  FieldType               type()            const { return m_type;         }
+  DataType                dtype()           const { return m_dtype;        }
+  ERL_NIF_TERM            atom()            const { return m_atom;         }
+  const int               ch_len()          const { return m_ch_len;       }
+  const char*             len_field()       const { return m_len_field;    }
+  const int               len_field_id()    const { return m_len_field_id; }
 
-  bool                    assigned()     const { return m_id != 0;      }
+  bool                    assigned()        const { return m_id != 0;      }
 
-  ERL_NIF_TERM            get_atom()     const;
+  ERL_NIF_TERM            get_atom()        const;
+  ERL_NIF_TERM            meta(ErlNifEnv*)  const; // Get metadata
 
-  bool                    has_values()   const { return m_choices.size(); }
-  size_t                  values_count() const { return m_choices.size(); }
+  bool                    has_values()      const { return m_choices.size(); }
+  size_t                  values_count()    const { return m_choices.size(); }
 
   FieldChoice const*      value(unsigned idx) const;
   FieldChoice const*      value(std::string_view const& val) const;
@@ -613,6 +663,22 @@ FieldChoice::get_atom(ErlNifEnv* env) const {
 }
 
 //------------------------------------------------------------------------------
+// Field implementation
+//------------------------------------------------------------------------------
+
+inline Field::Field()
+  : m_id          (0)
+  , m_type        (FieldType::UNDEFINED)
+  , m_dtype       (DataType::UNDEFINED)
+  , m_atom        (0)
+  , m_ch_len      (0)
+  , m_max_val_len (0)
+  , m_choices     {}
+  , m_len_field   (nullptr)
+  , m_len_field_id(0)
+{}
+
+//------------------------------------------------------------------------------
 template <typename DecF>
 Field::Field
 (
@@ -737,6 +803,35 @@ Field::get_atom() const
   return m_atom;
 }
 
+inline ERL_NIF_TERM
+Field::meta(ErlNifEnv* env) const
+{
+  std::vector<ERL_NIF_TERM> choices;
+  choices.reserve(m_choices.size());
+
+  for (auto c : m_choices)
+    choices.push_back(
+      enif_make_tuple2(env, create_binary(env, c.value), c.get_atom(env)));
+
+  std::vector<ERL_NIF_TERM> res{{
+    enif_make_tuple2(env, enif_make_atom(env, "id"),   enif_make_long(env, m_id)),
+    enif_make_tuple2(env, enif_make_atom(env, "name"), get_atom()),
+    enif_make_tuple2(env, enif_make_atom(env, "data_type"),
+                          enif_make_atom(env, m_dtype.to_string(m_dtype.value))),
+    enif_make_tuple2(env, enif_make_atom(env, "type"),
+                          enif_make_atom(env, type_to_string(m_type))),
+  }};
+  if (m_choices.size())
+    res.push_back(
+      enif_make_tuple2(env,
+        enif_make_atom(env, "values"),
+        m_choices.empty()
+          ? enif_make_list(env,0)
+          : enif_make_list_from_array(env, &choices.front(), m_choices.size())));
+
+  return enif_make_list_from_array(env, &res.front(), res.size());
+}
+
 inline FieldChoice const*
 Field::value(unsigned idx) const
 {
@@ -801,14 +896,20 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
     bval.size = snprintf((char*)tmp, sizeof(tmp), "%u", grp_len);
   } else {
     long n;
-    if (m_dtype == DataType::BOOL && 
-        (enif_is_identical(am_true, val) || enif_is_identical(am_false, val)))
-      val = am_true;
-    else if (enif_is_atom(env, val)) {
-      auto it    = m_atom_map.find(val);
+    if (m_dtype == DataType::BOOL) {
+      if      (enif_is_identical(am_true,  val)) tmp[0] = 'Y';
+      else if (enif_is_identical(am_false, val)) tmp[0] = 'N';
+      else
+        return am_error;
+      bval.data = tmp;
+      bval.size = 1;
+    } else if (enif_is_atom(env, val)) {
+      auto it = m_atom_map.find(val);
       if (it == m_atom_map.end()) [[unlikely]]
         return am_error;
       val = it->second;
+      if (!enif_inspect_binary(env, val, &bval)) [[unlikely]]
+        return am_error;
     }
     else if (enif_get_long(env, val, &n)) {
       bval.size = (m_dtype == DataType::DATETIME)
@@ -1040,11 +1141,18 @@ inline FixVariant
     m_bins.emplace_back(create_binary(env(), std::string_view(s, len)));
 
     // Populate the map that converts field names to tags
-    if (m_fields[i].id() != 0) {
+    if (m_fields[i].id() == 0)
+      continue;
+
+    m_name_to_tag_map.emplace
+      (std::make_pair(m_fields[i].name_str(), i));
+    m_atom_to_tag_map.emplace
+      (std::make_pair(enif_make_atom(env(), m_fields[i].name()), i));
+    if (strncmp(m_fields[i].name(), "Elixir.", 7) == 0) {
       m_name_to_tag_map.emplace
-        (std::make_pair(m_fields[i].name_str(), i));
+        (std::make_pair(m_fields[i].name()+7, i));
       m_atom_to_tag_map.emplace
-        (std::make_pair(enif_make_atom(env(), m_fields[i].name()), i));
+        (std::make_pair(enif_make_atom(env(), m_fields[i].name()+7), i));
     }
   }
 }
@@ -1155,22 +1263,6 @@ FixVariant::field_with_tag(ErlNifEnv* env, ERL_NIF_TERM tag)
   assert(fld->id() > 0 && fld->id() < field_count());
   return std::make_pair(fld, m_bins[fld->id()]);
 }
-
-//------------------------------------------------------------------------------
-// Field implementation
-//------------------------------------------------------------------------------
-
-inline Field::Field()
-  : m_id          (0)
-  , m_type        (FieldType::UNDEFINED)
-  , m_dtype       (DataType::UNDEFINED)
-  , m_atom        (0)
-  , m_ch_len      (0)
-  , m_max_val_len (0)
-  , m_choices     {}
-  , m_len_field   (nullptr)
-  , m_len_field_id(0)
-{}
 
 //------------------------------------------------------------------------------
 inline ERL_NIF_TERM

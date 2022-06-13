@@ -107,6 +107,32 @@ arg_code(FixVariant* var, ErlNifEnv* env, ERL_NIF_TERM val, int& code, int is_na
   return var->field_code(env, val, code, is_name);
 }
 
+static ERL_NIF_TERM
+field_meta_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  FixVariant* var;
+  int         code;
+
+  // Args must be:
+  // (Variant::atom(), Name::atom()|binary()|integer())
+  if ((argc != 2) || !pers->get(argv[0], var)
+                  || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
+    return enif_make_badarg(env);
+
+  assert(var);
+  assert(code > 0 && code < var->field_count());
+
+  auto field = var->field(code);
+
+  assert(field);
+
+  return field->meta(env);
+}
+
 // Convert (int()|binary()) -> atom():
 //   (<<"10">>) -> 'CheckSum'
 //   (10)       -> 'CheckSum'
@@ -126,10 +152,14 @@ tag_to_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return enif_make_badarg(env);
 
   // NOTE: This is guaranteed by the arg_code() call!
+  assert(var);
   assert(code > 0 && code < var->field_count());
-  assert(var->field(code));
 
-  return var->field(code)->get_atom();
+  auto field = var->field(code);
+
+  assert(field);
+
+  return field->get_atom();
 }
 
 // Convert (atom()|binary()) -> integer()|binary()
@@ -873,6 +903,7 @@ static ErlNifFunc fix_nif_funcs[] =
 {
   {"split",                 2, split_nif},
   {"split",                 3, split_nif},
+  {"field_meta",            2, field_meta_nif},
   {"tag_to_field",          2, tag_to_field_nif},
   {"field_to_tag",          2, field_to_tag_nif},
   {"decode_field_value",    3, decode_field_value_nif},

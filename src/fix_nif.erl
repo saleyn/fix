@@ -10,7 +10,7 @@
 
 -on_load(init_nif/0).
 
--export([split/2, split/3, tag_to_field/2, field_to_tag/2]).
+-export([split/2, split/3, tag_to_field/2, field_to_tag/2, field_meta/2]).
 -export([bin_to_integer/1, bin_to_integer/2]).
 -export([decode_field_value/3]).
 -export([encode_fields/2, encode_field_value/3, encode_field_tagvalue/3]).
@@ -63,6 +63,10 @@ split(_Variant, _Binary) ->
 %% If `Options' list has the `binary' atom, then return string fields as binaries.
 -spec split(atom(), binary(), Options::[binary | full | {delim,char()}]) -> decoded_message().
 split(_Variant, _Binary, _Options) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+-spec field_meta(atom(), binary()|string()|integer()) -> [{atom(), any()}].
+field_meta(_Variant, _Field) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
 -spec tag_to_field(atom(), binary()|string()|integer()) -> atom().
