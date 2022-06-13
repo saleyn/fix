@@ -17,7 +17,7 @@
 
 -record('header', {
   fields = #{
-    , 'MsgType'      => undefined %% Tag#  35
+      'MsgType'      => undefined %% Tag#  35
     , 'SenderCompID' => undefined %% Tag#  49
     , 'TargetCompID' => undefined %% Tag#  56
     , 'MsgSeqNum'    => undefined %% Tag#  34
