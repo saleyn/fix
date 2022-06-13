@@ -17,8 +17,6 @@
 
 -record('header', {
   fields = #{
-      'BeginString'  => undefined %% Tag#   8
-    , 'BodyLength'   => undefined %% Tag#   9
     , 'MsgType'      => undefined %% Tag#  35
     , 'SenderCompID' => undefined %% Tag#  49
     , 'TargetCompID' => undefined %% Tag#  56
@@ -27,6 +25,8 @@
   }
   %% Optional fields:
   %% ================
+  %% Tag#   8: BeginString    %% present only when decoded with fix_nif:decode(..., [full])
+  %% Tag#   9: BodyLength     %% present only when decoded with fix_nif:decode(..., [full])
   %% Tag#  43: PossDupFlag
   %% Tag#  97: PossResend
   %% Tag# 369: LastMsgSeqNumProcessed

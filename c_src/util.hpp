@@ -800,18 +800,20 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
     bval.data = tmp;
     bval.size = snprintf((char*)tmp, sizeof(tmp), "%u", grp_len);
   } else {
-    if (enif_is_atom(env, val)) {
-      auto it = m_atom_map.find(val);
+    long n;
+    if (m_dtype == DataType::BOOL && 
+        (enif_is_identical(am_true, val) || enif_is_identical(am_false, val)))
+      val = am_true;
+    else if (enif_is_atom(env, val)) {
+      auto it    = m_atom_map.find(val);
       if (it == m_atom_map.end()) [[unlikely]]
         return am_error;
       val = it->second;
     }
-    long n;
-    if (enif_get_long(env, val, &n)) {
-      if (m_dtype == DataType::DATETIME)
-        bval.size  = encode_timestamp(tmp, n, pers()->ts_type());
-      else
-        bval.size  = snprintf((char*)tmp, sizeof(tmp), "%ld", n);
+    else if (enif_get_long(env, val, &n)) {
+      bval.size = (m_dtype == DataType::DATETIME)
+        ? encode_timestamp(tmp, n, pers()->ts_type())
+        : snprintf((char*)tmp, sizeof(tmp), "%ld", n);
       bval.data = tmp;
     }
     else if (!enif_inspect_binary(env, val, &bval))

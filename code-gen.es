@@ -184,7 +184,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
                 "  vec[", spad(I, WID), "] = Field{      //--- Tag# ", integer_to_list(I), " ", q(Name), "\n",
                 "    fvar,\n"
                 "    ", LID, ",\n"
-                "    ", q(Name), ",\n"
+                "    ", q(atom_name(Name,State)), ",\n"
                 "    FieldType::", Type, ",\n"
                 "    ", dtype(RawType, MapDT), ",\n"
                 "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
@@ -292,22 +292,32 @@ generate_fields(Fields, FldMap, #state{} = State) ->
       ME = LE+2,
       IL = integer_to_list(ID),
       MD = lists:max([length(atom_name(caml_case(DD1),State)) || {_,DD1} <- Vals])+2,
+      IsBool = Type == 'BOOLEAN' andalso [C || {C,_} <- Vals] == ["N","Y"],
       ["\ndecode_fld_val", IL, "(Val) ->\n",
        "  case Val of",
-       [begin
-          MD = lists:max([length(atom_name(caml_case(DD1),State)) || {_,DD1} <- Vals])+2,
-          io_lib:format("\n    <<~s>> -> ~s; %% ~w",
-                        [qpad(CC,ME), string:pad(qname(caml_case(DD),State), MD), II])
-        end || {II,{CC,DD}} <- lists:zip(lists:seq(0, length(Vals)-1), Vals)],
+       if IsBool ->
+         ["\n    <<\"N\">> -> false;"
+          "\n    <<\"Y\">> -> true;"];
+       true ->
+         [begin
+            MD = lists:max([length(atom_name(caml_case(DD1),State)) || {_,DD1} <- Vals])+2,
+            io_lib:format("\n    <<~s>> -> ~s; %% ~w",
+                          [qpad(CC,ME), string:pad(qname(caml_case(DD),State), MD), II])
+          end || {II,{CC,DD}} <- lists:zip(lists:seq(0, length(Vals)-1), Vals)]
+       end,
        "\n    ", string:pad("_", ME+4), " -> Val"
        "\n  end.\n\n",
        if Tp /= group ->
-        [[["encode_fld_val", IL, "(ID,_T, ", sqpad(caml_case(DD), MD), ") -> encode_tagval(ID, <<",
-          qpad(CC,ME), ">>);\n"]
-          || {CC,DD} <- Vals],
-         "encode_fld_val", IL, "(ID, T, ", string:pad("V",MD), ") -> try_encode_val(ID, T, V).\n"];
+         if IsBool ->
+           [["encode_fld_val", IL, "(ID,_T, ", C1, ") -> encode_tagval(ID, <<",q(V1),">>)", T1, $\n]
+             || {C1, V1, T1} <- [{"false", "N", ";"}, {"true ", "Y", "."}]];
+         true ->
+           [[["encode_fld_val", IL, "(ID,_T, ", sqpad(atom_name(caml_case(DD),State), MD), ") -> encode_tagval(ID, <<",
+            qpad(CC,ME), ">>);\n"] || {CC,DD} <- Vals],
+           "encode_fld_val", IL, "(ID, T, ", string:pad("V",MD), ") -> try_encode_val(ID, T, V).\n"]
+         end;
        true ->
-        []
+         []
        end
       ]
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
@@ -389,7 +399,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
 
 generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = State) ->
   {'MsgType', _, _, MsgTypes} = maps:get(35, FldMap),
-  MTW  = lists:max([length(atom_to_list(Msg)) || {Msg, _Type, _Cat, _Fields} <- Messages]),
+  MTW  = lists:max([length(atom_name(Msg,State)) || {Msg, _Type, _Cat, _Fields} <- Messages]),
   FNm  = add_variant_suffix("fix_decoder", State),
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
   [
@@ -415,8 +425,8 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
           [];
         {Msg, _Type, _Cat, _Fields} ->
           [
-            "decode_msg(", sqpad(Msg, MTW+2), ",L)", spad("", MTW),
-            " -> ", ["decode_msg_", spad(Msg,MTW), "(L, #", sq(Msg), "{}, 0, []);\n"]
+            "decode_msg(", sqpad(atom_name(Msg,State), MTW+2), ",L)", spad("", MTW),
+            " -> ", ["decode_msg_", spad(Msg,MTW), "(L, #", sq(atom_name(Msg,State)), "{}, 0, []);\n"]
           ]
       end
     end, MsgTypes),
@@ -435,6 +445,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
               R
           end,
         MWD  = lists:max([length(atom_to_list(M)) || {M, _T, _C, _FF} <- Messages]),
+        MWDe = lists:max([length(atom_name(M,State)) || {M, _T, _C, _FF} <- Messages]),
         Flds = [{GrpOrFld, get_attr(name,A)} || {GrpOrFld, A,_F} <- Fields],
         MFW  = lists:max([length(sq(N)) || {_, N} <- Flds]),
         %MGW  = iif(Grps==[], 0, lists:max([length(atom_to_list(group_name(G))) || G <- Grps])),
@@ -450,9 +461,11 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
                 field -> {"T", "V", "V", []}
               end,
             [
-              "decode_msg_", spad(MsgName, MWD), "([{", sqpad(FName,MFW), ", ", Val, ",_Tag,_Pos}|T], R, I, U) ->",
+              "decode_msg_", spad(MsgName, MWD), "([{", sqpad(atom_name(FName,State),MWDe), ", ", Val, ",_Tag,_Pos}|T], R, I, U) ->",
               Add,
-              " decode_msg_", MsgName, "(", Var, ", ?MAP_SET(R, ", sq(MsgName), ", ", sqpad(FName,MFW), ", ", Res, "), I+1, U);\n"
+              " decode_msg_", MsgName, "(", Var, ", ?MAP_SET(R, ",
+                sq(iif(MsgName=="header", MsgName, atom_name(MsgName,State))), ", ",
+                sqpad(atom_name(FName,State),MWDe), ", ", Res, "), I+1, U);\n"
             ]
           end, Flds),
           "decode_msg_", spad(MsgName, MWD), "([{K,V}|T], R, I, U) ", spad("", MFW+9), " -> decode_msg_", MsgName, "([{K,V,undefined,undefined}|T], R, I, U);\n",
@@ -752,10 +765,19 @@ read_file(#state{file = Xml, schema = Schema, config = Config, debug = Debug}) -
   FldMap  = lists:foldl(fun({FldOrGrpTag, A, V} = F, M) ->
     Name  = get_attr(name,  A),
     ID    = get_attr(number,A),
-    Type  = get_attr(type,  A),
+    Type0 = get_attr(type,  A),
     Name /= undefined orelse throw({unknown_field_name, F}),
     is_integer(ID)    orelse throw({unknown_field_number, Name, ID}),
-    M#{ID => {Name, Type, FldOrGrpTag, [{get_attr(enum, AX), get_attr(description, AX)} || {value, AX, _} <- V]}}
+    Vals0 = lists:sort([{get_attr(enum, AX), get_attr(description, AX)} || {value, AX, _} <- V]),
+    Len   = iif(Vals0==[], 0, lists:max([length(C) || {C,_} <- Vals0])),
+    ValYN = Len==1 andalso [C || {C,_} <- Vals0] == ["N","Y"],
+    {Type, Vals}  =
+      if Type0=='BOOLEAN' orelse ((Type0=='CHAR') and ValYN) ->
+        {'BOOLEAN', []};
+      true ->
+        {Type0, Vals0}
+      end,
+    M#{ID => {Name, Type, FldOrGrpTag, Vals}}
   end, #{}, Fields2),
 
   NameMap = maps:fold(fun(ID, {Name, _Type, _FldOrGrp, _Vals}, A) -> A#{Name => ID} end, #{}, FldMap),
