@@ -494,11 +494,19 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
   NameMap   = maps:fold(fun(ID, {Name, _Type, _FldOrGrp, _Vals}, A) -> A#{Name => ID} end, #{}, FldMap),
   MaxIDLen  = length(integer_to_list(maps:fold(fun(ID, _, A) -> max(ID,A) end, 0, FldMap))),
   Mandatory = proplists:get_value(mandatory, Cfg, #{}),
+  Optional  = proplists:get_value(optional,  Cfg, #{}),
+
   %% Check mandatory message configs for invalid message names
   maps:foreach(fun(Msg, _) ->
     lists:keyfind(Msg, 1, Messages) == error
       andalso throw("Invalid message name ~w found in mandatory message config!")
   end, Mandatory),
+  %% Check optional message configs for invalid message names
+  maps:foreach(fun(Msg, _) ->
+    lists:keyfind(Msg, 1, Messages) == error
+      andalso throw("Invalid message name ~w found in optional message config!")
+  end, Optional),
+
   %% Check mandatory message configs for invalid field names
   maps:foreach(fun(Msg, Flds) ->
     [maps:find(I, NameMap) == error
@@ -506,9 +514,16 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
       || I <- Flds]
   end, Mandatory),
 
+  %% Check optional message configs for invalid field names
+  maps:foreach(fun(Msg, Flds) ->
+    [maps:find(I, NameMap) == error
+        andalso throw("Invalid optional field ~w found in configuration of msg ~w", [I, Msg])
+      || I <- Flds]
+  end, Optional),
+
   [{header, _, _, _HdrFlds} | Msgs] = AllMsgs =
     lists:map(fun({M,T,C,FF}) ->
-      {M, T, C, split_req_and_opt_fields(FF, maps:find(M, Mandatory))}
+      {M, T, C, split_req_and_opt_fields(FF, maps:get(M, Mandatory, []), maps:get(M, Optional, []))}
     end, [Header | Messages]),
 
   %%GrpNames = [G || {_Msg, G, _FF} <- AllGrps]
@@ -525,8 +540,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
   %  lists:max([length(atom_to_list(group_name(G))) || G <- GrpNames]),
 
   Name2ID  = fun(N) -> maps:get(N, NameMap) end,
-  % AdminOut = [create_rec(header, "", HdrFlds, State, MaxReqFldLen, MaxIDLen, Name2ID)
-  %             | [create_rec(M, Tp, FF, State, MaxReqFldLen, MaxIDLen, Name2ID) || {M, Tp, admin, FF} <- Msgs]],
+  %AdminHdr = [create_rec(header, "", HdrFlds, State, MaxReqFldLen, MaxIDLen, Name2ID)],
   AdminOut = [create_rec(M, Tp, FF, State, MaxReqFldLen, MaxIDLen, Name2ID) || {M, Tp, admin, FF} <- Msgs],
   AppOut   = [create_rec(M, Tp, FF, State, MaxNLen, MaxIDLen, Name2ID)      || {M, Tp, app,   FF} <- Msgs],
 
@@ -534,13 +548,12 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
     "-include_lib(\"fix/include/fix.hrl\").\n",
     "-include(\"", add_variant_suffix("fix_adm_msgs.hrl", State), "\").\n",
     "-include(\"", add_variant_suffix("fix_app_msgs.hrl", State), "\").\n"
+    %"\n" |
+    %AdminHdr
   ],
 
-  if State#state.var_sfx /= "" ->
-    ok = write_file(erlang, inc, State, add_variant_suffix("fix.hrl", State), ["%% Common include for FIX ", State#state.variant, " variant\n"], FixHRL);
-  true ->
-    ok
-  end,
+  SFX /= "" andalso
+    (ok = write_file(erlang, inc, State, add_variant_suffix("fix.hrl", State), ["%% Common include for FIX ", State#state.variant, " variant\n"], FixHRL)),
   ok = write_file(erlang, inc, State, add_variant_suffix("fix_adm_msgs.hrl", State), ["%% Administrative FIX messages\n"], AdminOut),
   ok = write_file(erlang, inc, State, add_variant_suffix("fix_app_msgs.hrl", State), ["%% Application FIX messages\n"],    AppOut),
   ok = write_file(erlang, src, State, add_variant_suffix("fix_groups.erl",   State), ["%% Metadata about FIX groups\n"],
@@ -832,12 +845,20 @@ expand_components([{component, A, []} | T], Components, Msg) ->
   L1   = expand_components(L0, Components, Msg),
   L1  ++ expand_components(T,  Components, Msg).
 
-split_req_and_opt_fields(Fields, error) ->
+split_req_and_opt_fields(Fields, [], []) ->
   split_req_and_opt_fields(Fields);
-split_req_and_opt_fields(Fields, {ok, MandFields}) ->
-  FF = [{FldOrGrp, lists:keystore(required, 1, A,
-          {required, iif(lists:member(get_attr(name,A), MandFields), add, get_attr(required,A))}), V}
-        || {FldOrGrp, A, V} <- Fields],
+split_req_and_opt_fields(Fields, MandFields, OptFields) ->
+  FF = lists:map(fun({FldOrGrp, A, V}) ->
+    Name  = get_attr(name,A),
+    IsOpt = lists:member(Name, OptFields),
+    IsReq = lists:member(Name, MandFields),
+    Req   = case {IsOpt, IsReq} of 
+              {true, _} -> false;
+              {_, true} -> add;
+              _         -> get_attr(required,A)
+            end,
+    {FldOrGrp, lists:keystore(required, 1, A, {required, Req}), V}
+  end, Fields),
   split_req_and_opt_fields(FF).
 
 split_req_and_opt_fields(FF) ->
@@ -937,7 +958,7 @@ create_rec(Name, MsgTp, MsgFields, State, Margin, MaxIDLen, Name2ID) ->
              || {Idx, {N,IsGrp,ID}} <- lists:zip(lists:seq(1,Len), IDNames)],
   [
     iif(MsgTp=="" orelse MsgTp==group, "", "%% Message type: \""++MsgTp++"\"\n"),
-    "-record(", qname(atom_name(Name, State)), ", {\n"
+    "-record(", qname(iif(Name=='header', atom_to_list(Name), atom_name(Name, State))), ", {\n"
     "  fields = #{", iif(Len > 0, "\n", ""),  %% Margin+2), iif(HasFlds and not AsMap, ",", ""),
     %%iif(HasFlds and not AsMap, " %% Optional fields", " %% Map of fields"), "\n",
     ReqFlds,
