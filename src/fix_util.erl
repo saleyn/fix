@@ -9,8 +9,8 @@
 -module(fix_util).
 -include("fix.hrl").
 
--export([now/0, timestamp/0, timestamp/1, decode/5, decode_msg/2,
-         encode/5, dumpstr/1, dump/1, undump/1, split/4]).
+-export([now/0, timestamp/0, timestamp/1, decode/5,
+         dumpstr/1, dump/1, undump/1, split/4]).
 -export([try_encode_val/3, try_encode_group/3]).
 -export([encode_tagval/2,  encode_tagval/3]).
 -export([find_variants/0]).
@@ -38,24 +38,27 @@ timestamp(EpochUSecs) when is_integer(EpochUSecs) ->
 
 %% @doc Parse the first FIX message in the `Bin' binary.
 %% The function returns
-%% `{ok, Rest, {MatchedFldCount, Header, Msg, UnparsedFields}}', where
+%% `{ok, Rest, {MatchedFldCount, Header, Msg, UnparsedFields}|false}', where
 %% `Rest' is the unparsed trailing binary. `MatchedFldCount' is the number
 %% of matched fields in the `Msg'. `Header' is the FIX message header.
 %% `Msg' is a record containing the FIX message body. `UnparsedFields' are
-%% the fields not recognized by the message parser.
+%% the fields not recognized by the message parser. The 3rd element will be
+%% `false' if the codec couldn't parse the message (e.g. the header doesn't
+%% contain required fields.
 -spec decode(nif|native, atom(), atom(), binary(), [binary|full]) ->
-  {ok, Rest::binary(), {MatchedFldCount::integer(), Header::#header{},
-                        Msg::tuple(), UnparsedFields::list()}}
+  {ok, Rest::binary(), {MatchedFldCount::integer(), Header::map(),
+                        {MsgType::atom(),Msg::map()}, UnparsedFields::list()} |
+                       false}
      | {more, non_neg_integer()}
      | error.
 decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
   try
     case do_split(Mode, CodecMod, FixVariant, Bin, Options) of
       {ok, MsgLen, Msg} when MsgLen == byte_size(Bin) ->
-        {ok, <<>>, decode_msg(CodecMod, Msg)};
+        {ok, <<>>, CodecMod:decode_msg(Msg)};
       {ok, MsgLen, Msg} ->
         <<_:MsgLen/binary, Rest>> = Bin,
-        {ok, Rest, decode_msg(CodecMod, Msg)};
+        {ok, Rest, CodecMod:decode_msg(Msg)};
       {error, {_Why, _Pos, _Tag}} = R ->
         R;
       {more, _Size} = R ->
@@ -64,93 +67,6 @@ decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
   catch error:Error:ST ->
     erlang:raise(error, {"Failed to decode FIX msg", Error, Bin}, ST)
   end.
-
-decode_msg(CodecMod, Msg) when is_atom(CodecMod), is_list(Msg) ->
-  case CodecMod:decode_msg_header(Msg) of
-    {H = #header{fields = #{'MsgType' := MsgType}}, I, L} when I > 0 ->
-      {M, I1, U} = CodecMod:decode_msg(MsgType, L),
-      {I1, H, M, U};
-    _ ->
-      false
-  end.
-
--spec encode(nif|native, atom(), atom(), #header{}, {atom(), map()}) -> binary().
-encode(Mode, EncoderMod, Variant,
-       #header{fields   = #{
-        'BeginString'  := FixVerStr,
-        'MsgSeqNum'    := SeqNum,
-        'SenderCompID' := Sender,
-        'TargetCompID' := Target
-       } = Hdr},
-       {MsgName, MsgFields} = _Msg)
-->
-  L = ['BeginString', 'MsgSeqNum', 'SenderCompID', 'TargetCompID', 'SendingTime'],
-  TStamp0 = maps:get('SendingTime', Hdr, undefined),
-  TStamp  = nvl(TStamp0, timestamp()),
-  MsgFlds = [KV || KV = {_,V} <- maps:to_list(MsgFields), V /= undefined],
-  Fields  = lists:foldl(fun
-              ({_,undefined},A) -> A;
-              (KV,A) -> [KV | A]
-            end, MsgFlds, maps:to_list(maps:without(L, Hdr))),
-  Body    = [
-    {'MsgType',      MsgName},
-    {'SenderCompID', Sender},
-    {'TargetCompID', Target},
-    {'MsgSeqNum',    SeqNum},
-    {'SendingTime',  TStamp}
-    | Fields],
-  encode_msg(Mode, EncoderMod, Variant, Body, FixVerStr).
-
-encode_msg(nif, _EncoderMod, Variant, Body0, FixVerStr) when is_atom(Variant) ->
-  Body1   = encode_msg_nif(Variant, Body0),
-  BodyLen = iolist_size(Body1),
-  Bin     = iolist_to_binary([
-    encode_field_nif(Variant, 'BeginString', FixVerStr),
-    encode_field_nif(Variant, 'BodyLength',  BodyLen),
-    Body1,
-    encode_field_nif(Variant, 'CheckSum', <<"000">>)
-  ]),
-  fix_nif:update_checksum(Bin);
-
-encode_msg(native, EncoderMod, _Variant, Body0, FixVerStr) ->
-  Body1   = encode_msg_native(EncoderMod, Body0),
-  BodyLen = iolist_size(Body1),
-  Body2   = [
-    encode_field_native(EncoderMod, 'BeginString', FixVerStr),
-    encode_field_native(EncoderMod, 'BodyLength',  BodyLen),
-    Body1
-  ],
-  Bin  = iolist_to_binary(Body2),
-  SumI = lists:sum([Char || <<Char>> <= Bin]) rem 256,
-  SumB = list_to_binary(io_lib:format("~3..0B", [SumI])),
-  <<Bin/binary, "10=", SumB/binary, 1>>.
-
-encode_field_nif(Variant, Tag, Val) when is_atom(Variant), is_atom(Tag) ->
-  fix_nif:encode_field_tagvalue(Variant, Tag, Val).
-
-encode_field_native(CodecMod, Tag, Val) when is_atom(CodecMod), is_atom(Tag) ->
-  {_Num, _Type, Fun} = CodecMod:field_tag(Tag),
-  Fun(Val).
-
--spec encode_msg_native(atom(), binary() | proplists:proplist()) -> iolist().
-encode_msg_native( CodecMod, [{K,V}|T]) when is_atom(K) ->
-  [encode_field_native(CodecMod, K, V) | encode_msg_native(CodecMod, T)];
-encode_msg_native( CodecMod, [{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->
-  [encode_field_native(CodecMod, K, V) | encode_msg_native(CodecMod, T)];
-encode_msg_native(_CodecMod, []) ->
-  [];
-encode_msg_native(_CodecMod, Packet) when is_binary(Packet) ->
-  Packet.
-
--spec encode_msg_nif(atom(), binary() | proplists:proplist()) -> iolist().
-encode_msg_nif( Variant, [{K,V}|T]) when is_atom(K) ->
-  [fix_nif:encode_field_tagvalue(Variant, K, V) | encode_msg_nif(Variant, T)];
-encode_msg_nif( Variant, [{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->
-  [fix_nif:encode_field_tagvalue(Variant, K, V) | encode_msg_nif(Variant, T)];
-encode_msg_nif(_Variant, []) ->
-  [];
-encode_msg_nif(_Variant, Packet) when is_binary(Packet) ->
-  Packet.
 
 -spec dump(binary() | iolist()) -> binary().
 dump(Bin) when is_binary(Bin) ->
@@ -169,16 +85,24 @@ dumpstr(Encoded) ->
 %% @doc Find all known FIX variants `*.so' NIF libraries.
 -spec find_variants() -> [string()].
 find_variants() ->
-  Priv = filename:dirname(code:which(?MODULE)) ++ "/../priv",
-
   %% Get the list of supported FIX variants to load. These should be either
   %% directory names containing `*.so' files, or the full `*.so' file names
   %% or application names in which the `priv' dirs will be searched for
   %% '*.so' files:
-  Apps   = application:which_applications(),
-  Vars   = application:get_env(fix, fix_variants, get_variants_from_env()),
-  lists:foldl(fun(V, S) ->
-    Msk  =
+  Apps  = application:which_applications(),
+  Vars  = case application:get_env(fix, fix_variants, []) of
+            [] ->
+              case get_variants_from_env() of
+                [] ->
+                  [filename:join(filename:dirname(I), "priv/fix_fields*.so")
+                    || I <- code:get_path(), string:find(I, "/fix") /= nomatch];
+                VV -> VV
+              end;
+            Variants ->
+              Variants
+          end,
+  Res = lists:foldl(fun(V, S) ->
+    {NoWarning, Msk} =
       if is_atom(V) ->
         case lists:keymember(V, 1, Apps) of
           true ->
@@ -186,19 +110,20 @@ find_variants() ->
               {error, _} ->
                 throw("Undefined priv directory of application: ~w", [V]);
               Dir ->
-                filename:join(filename:absname(Dir), "fix_fields*.so")
+                {false, filename:join(Dir, "fix_fields*.so")}
             end;
           false ->
-            throw("Fix variant application '~w' is not known!", [V]) 
+            throw("Fix variant application '~w' is not known!", [V])
         end;
       is_list(V); is_binary(V) ->
         IsDir   = filelib:is_dir(V),
         IsFile  = filelib:is_file(V),
         Val     = iif(is_binary(V), binary_to_list(V), V),
+        IsWild  = string:find(Val, "fix_fields*.so") /= nomatch,
         if IsDir ->
-          filename:join(Val, "fix_fields*.so");
-        IsFile ->
-          Val;
+          {false, filename:join(Val, "fix_fields*.so")};
+        IsFile; IsWild ->
+          {IsWild, Val};
         true ->
           throw("File/Dir name '~s' not found!", [Val])
         end;
@@ -206,7 +131,7 @@ find_variants() ->
         throw("Invalid argument in fix.fix_variants: ~p", [V])
       end,
     case filelib:wildcard(Msk) of
-      [] when V /= Priv ->
+      [] when not NoWarning ->
         logger:warning("No shared object files found matching name: ~s", [Msk]),
         S;
       [] ->
@@ -214,7 +139,8 @@ find_variants() ->
       Names ->
         Names ++ S
     end
-  end, [], [Priv | Vars]).
+  end, [], Vars),
+  lists:usort(Res).
 
 
 do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
@@ -270,14 +196,10 @@ get_variants_from_env() ->
       [];
     Env ->
       lists:foldl(fun(S,L) ->
-        try
-          A = list_to_existing_atom(S),
-          case lists:keymember(A, 1, application:which_applications()) of
-            true  -> [A | L];
-            false -> L
-          end
-        catch _:_ ->
-          L
+        L = [atom_to_list(element(1,A)) || A <- application:which_applications()],
+        case lists:member(S, L) of
+          true  -> [list_to_atom(S) | L];
+          false -> L
         end
       end, [], string:split(Env, ":", all))
   end.

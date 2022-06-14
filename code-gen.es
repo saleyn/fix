@@ -93,7 +93,7 @@ main(Args) ->
                         {Name::atom(), Type::atom(), [{Enum::string(), Descr::string()}]}},
                       #state{}) ->
   #{ID::integer() => {Name::atom(), Type::atom(), [{Enum::string(), Descr::string()}]}}.
-generate_fields(Fields, FldMap, #state{} = State) ->
+generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   Types  = lists:sort(sets:to_list(sets:from_list([T || {field,A,_} <- Fields, {type,T} <- A]))),
   MapDT  = #{'AMT'                => float
             ,'BOOLEAN'            => bool
@@ -206,18 +206,18 @@ generate_fields(Fields, FldMap, #state{} = State) ->
                     "\n";
                   LE == 1 ->
                     ["\n"
-                     "      if (!len) [[unlikely]] return am_undefined;\n"
+                     "      if (!len) [[unlikely]] return am_", undef(State), ";\n"
                      "      switch (code[0]) {\n",
                      [io_lib:format("        case '~s': return f.value_atom(~s); // ~s\n",
                                     [CC,spad(integer_to_list(II),LEn),DD])
                       || {II,{CC,DD}} <- NVals],
-                     "        default: return am_undefined;\n"
+                     "        default: return am_", undef(State), ";\n"
                      "      }\n"
                     ];
                   LE > 8 ->
                     ["\n"
                      "      auto   fc = f.value(std::string_view(code, len));\n",
-                     "      return fc ? fc->get_atom(env) : am_undefined;\n"
+                     "      return fc ? fc->get_atom(env) : am_", undef(State), ";\n"
                     ];
                   true ->
                     MML = integer_to_list(lists:max([length(to_char_str(CC)) || {CC,_} <- Vals])),
@@ -228,7 +228,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
                      [io_lib:format("        case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
                         [iif(length(CC)==1, qname(CC), to_char_str(CC)),II,caml_case(DD)])
                       || {II,{CC,DD}} <- NVals],
-                     "        default: return am_undefined;\n"
+                     "        default: return am_", undef(State), ";\n"
                      "      }\n"
                     ]
                 end,
@@ -257,7 +257,7 @@ generate_fields(Fields, FldMap, #state{} = State) ->
   FN2 = add_variant_suffix("fix_fields", State),
   ok  = write_file(erlang, src, State, FN2++".erl", [], [
     "-module(", FN2, ").\n"
-    "-export([field/1, field_tag/1]).\n\n"
+    "-export([field/1, field_tag/1, encode_msg/2]).\n\n"
     "-import(fix_util, [try_encode_val/3, try_encode_group/3, encode_tagval/2]).\n\n",
     lists:map(fun({ID, {Name, Type, _FldOrGrp, Vals}}) ->
       [
@@ -285,7 +285,35 @@ generate_fields(Fields, FldMap, #state{} = State) ->
        " end};\n"
       ]
      end || {ID, {Name, Type, _FldOrGrp, Vals}} <- FldList],
-    "field_tag(_) -> erlang:error(badarg).\n\n",
+    "field_tag(_) -> erlang:error(badarg).\n"
+    "\n"
+    "-spec encode_msg(binary() | proplists:proplist(), binary()) -> iolist().\n"
+    "encode_msg(Body0, FixVerStr) ->\n"
+    "  Body1   = encode_msg(Body0),\n"
+    "  BodyLen = iolist_size(Body1),\n"
+    "  Body2   = [\n"
+    "    encode_field(", sq(atom_name('BeginString',State)), ", FixVerStr),\n"
+    "    encode_field(", sq(atom_name('BodyLength', State)),  ",  BodyLen),\n"
+    "    Body1\n"
+    "  ],\n"
+    "  Bin  = iolist_to_binary(Body2),\n"
+    "  SumI = lists:sum([Char || <<Char>> <= Bin]) rem 256,\n"
+    "  SumB = list_to_binary(io_lib:format(\"~3..0B\", [SumI])),\n"
+    "  <<Bin/binary, \"10=\", SumB/binary, 1>>.\n"
+    "\n"
+    "-spec encode_msg(binary() | proplists:proplist()) -> iolist().\n"
+    "encode_msg([{K,V}|T]) when is_atom(K) ->\n"
+    "  [encode_field(K, V) | encode_msg(T)];\n"
+    "encode_msg([{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->\n"
+    "  [encode_field(K, V) | encode_msg(T)];\n"
+    "encode_msg([]) ->\n"
+    "  [];\n"
+    "encode_msg(Packet) when is_binary(Packet) ->\n"
+    "  Packet.\n\n"
+    "encode_field(Tag, Val) when is_atom(Tag) ->\n"
+    "  {_Num, _Type, Fun} = field_tag(Tag),\n"
+    "  Fun(Val).\n\n",
+
     [begin
       Tp = maps:get(Type, MapDT),
       LE = lists:max([length(CC1) || {CC1,_} <- Vals]),
@@ -323,15 +351,15 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
     "\n"
   ]),
-  ok = write_file(erlang, src, State, "fix_codec" ++ State#state.var_sfx ++ ".erl", [], [
-    "-module(fix_codec", State#state.var_sfx, ").\n"
-    "-export([decode/2, decode/3, decode_msg/1, encode/3, split/2, split/3]).\n"
+  ok = write_file(erlang, src, State, add_variant_suffix("fix_codec.erl", SFX), [], [
+    "-module(fix_codec", SFX, ").\n"
+    "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
     "-include_lib(\"fix/include/fix.hrl\").\n"
     "\n"
     "-define(FIX_VARIANT,         ", nvl(State#state.variant, "default"), ").\n"
-    "-define(FIX_DECODER_MODULE,  fix_decoder", State#state.var_sfx, ").\n"
-    "-define(FIX_ENCODER_MODULE,  fix_fields", State#state.var_sfx, ").\n"
+    "-define(FIX_DECODER_MODULE,  fix_decoder", SFX, ").\n"
+    "-define(FIX_ENCODER_MODULE,  fix_fields", SFX, ").\n"
     "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
     "\n"
     "%% @doc Parse the first FIX message in the Bin.\n"
@@ -342,10 +370,10 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     "%% `Msg' is a record containing the FIX message body. `UnparsedFields' are\n"
     "%% the fields not recognized by the message parser.\n"
     "-spec decode(nif|native, binary(), [binary|full]) ->\n"
-    "  {ok, Rest::binary(), {MatchedFldCount::integer(), Header::#header{},\n"
-    "                        Msg::tuple(), UnparsedFields::list()}}\n"
-    "    | {more, non_neg_integer()}\n"
-    "    | error.\n"
+    "     {ok, Rest::binary(), {MatchedFldCount::integer(), Header::map(),\n"
+    "       {MsgType::atom(), Msg::map()}, UnparsedFields::list()}}\n"
+    "   | {more, non_neg_integer()}\n"
+    "   | error.\n"
     "decode(Mode, Bin, Options) ->\n"
     "  fix_util:decode(Mode, ?FIX_DECODER_MODULE, ?FIX_VARIANT, Bin, Options).\n"
     "\n"
@@ -355,17 +383,68 @@ generate_fields(Fields, FldMap, #state{} = State) ->
     "%% Decodes a list of [{Key, Value}] pairs to a FIX message.\n"
     "%% Use after splitting the message with split/1\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
-    "  fix_util:decode_msg(?FIX_DECODER_MODULE, Msg).\n"
+    "  ?FIX_DECODER_MODULE:decode_msg(Msg).\n"
     "\n"
-    "-spec encode(nif|native, #header{}, {atom(),map()}) -> binary().\n"
-    "encode(Mode, #header{fields = F} = Hdr, {_MsgType,_} = Msg) ->\n"
-    "  Hdr1 = Hdr#header{fields = F#{'BeginString' => ?FIX_BEGIN_STR}},\n"
-    "  fix_util:encode(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Hdr1, Msg).\n\n"
     "split(Mode, Bin) -> split(Mode, Bin, []).\n\n"
     "-spec split(nif|native, binary(), [binary|full]) ->\n"
     "        [{atom(), binary()|{integer(),integer()}, any(), {integer(),integer()}}].\n"
     "split(Mode, Bin, Opts) ->\n"
     "  fix_util:split(Mode, ?FIX_VARIANT, Bin, Opts).\n"
+    "\n"
+    "-spec encode(nif|native, Header::map(), {atom(), map()}) -> binary().\n"
+    "encode(Mode, Hdr =\n"
+    "      #{\n"
+    "        ", sq(atom_name('MsgSeqNum', State)), "    := SeqNum,\n"
+    "        ", sq(atom_name('SenderCompID', State)), " := Sender,\n"
+    "        ", sq(atom_name('TargetCompID', State)), " := Target\n"
+    "      },\n"
+    "      {MsgName, Msg} = _Msg)\n"
+    "->\n"
+    "  Hdr0    = maps:to_list(maps:without([\n"
+    "             ", sq(atom_name('BeginString',State)), ", "
+                   , sq(atom_name('MsgSeqNum',  State)), ",\n"
+    "             ", sq(atom_name('SenderCompID', State)), ", "
+                   , sq(atom_name('TargetCompID', State)), ",\n"
+    "             ", sq(atom_name('SendingTime',  State)), "], Hdr)),\n"
+    "  TStamp  = case maps:find(", sq(atom_name('SendingTime', State)), ", Hdr0) of\n"
+    "              {ok, TS} -> TS;\n"
+    "              error    -> fix_util:timestamp()\n"
+    "            end,\n"
+    "  HdrFlds = [KV || KV = {_,V} <- Hdr0, V /= ", undef(State), "],\n"
+    "  MsgFlds = [KV || KV = {_,V} <- maps:to_list(Msg), V /= ", undef(State), "],\n"
+    "  Fields  = HdrFlds ++ MsgFlds,\n"
+    "  Body    = [\n"
+    "    {", sq(atom_name('MsgType',      State)), ", MsgName},\n"
+    "    {", sq(atom_name('SenderCompID', State)), ", Sender},\n"
+    "    {", sq(atom_name('TargetCompID', State)), ", Target},\n"
+    "    {", sq(atom_name('MsgSeqNum',    State)), ", SeqNum},\n"
+    "    {", sq(atom_name('SendingTime',  State)), ", TStamp}\n"
+    "    | Fields],\n"
+    "  encode_msg(Mode, Body).\n"
+    "\n"
+    "encode_msg(native, Body) ->\n"
+    "  ?FIX_DECODER_MODULE:encode_msg(Body, ?FIX_BEGIN_STR);\n"
+    "\n"
+    "encode_msg(nif, Body0) ->\n"
+    "  Body1   = encode_msg_nif(Body0),\n"
+    "  BodyLen = iolist_size(Body1),\n"
+    "  Bin     = iolist_to_binary([\n"
+    "    fix_nif:encode_field_tagvalue(?FIX_VARIANT, ", sq(atom_name('BeginString',State)), ", ?FIX_BEGIN_STR),\n"
+    "    fix_nif:encode_field_tagvalue(?FIX_VARIANT, ", sq(atom_name('BodyLength', State)), ",  BodyLen),\n"
+    "    Body1,\n"
+    "    fix_nif:encode_field_tagvalue(?FIX_VARIANT, ", sq(atom_name('CheckSum',   State)), ", <<\"000\">>)\n"
+    "  ]),\n"
+    "  fix_nif:update_checksum(Bin).\n"
+    "\n"
+    "-spec encode_msg_nif(binary() | proplists:proplist()) -> iolist().\n"
+    "encode_msg_nif([{K,V}|T]) when is_atom(K) ->\n"
+    "  [fix_nif:encode_field_tagvalue(K, V) | encode_msg_nif(T)];\n"
+    "encode_msg_nif([{K,V,Tag,_Pos}|T]) when is_atom(K), is_integer(Tag) ->\n"
+    "  [fix_nif:encode_field_tagvalue(K, V) | encode_msg_nif(T)];\n"
+    "encode_msg_nif([]) ->\n"
+    "  [];\n"
+    "encode_msg_nif(Packet) when is_binary(Packet) ->\n"
+    "  Packet.\n"
   ]),
   %%if Variant == "" ->
   %%  ok;
@@ -404,7 +483,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
   [
     "-module(", FNm, ").\n"
-    "-export([decode_msg/2, decode_msg_header/1, field/1]).\n\n",
+    "-export([decode_msg/1, decode_msg/2, field/1]).\n\n",
     if SFX == "" ->
       ["-include(\"fix.hrl\").\n"
        "-include(\"", add_variant_suffix("fix_adm_msgs.hrl", State), "\").\n"
@@ -416,8 +495,14 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     "-define(MAP_SET(_R, _M, _F, _V), _R#_M{fields = (R#_M.fields)#{_F => _V}}).\n"
     "\n"
     "field(N) -> fix_fields", SFX, ":field(N).\n\n"
-    "decode_msg_header(Msg) ->\n"
-    "  decode_msg_header(Msg, #header{}, 0, []).\n"
+    "decode_msg(Msg) when is_list(Msg) ->\n"
+    "  case decode_msg_header(Msg, #header{}, 0, []) of\n"
+    "    {#header{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
+    "      {M, I1, U} = decode_msg(MT, L),\n"
+    "      {I1, H, M, U};\n"
+    "    _ ->\n"
+    "      false\n"
+    "  end.\n"
     "\n",
     lists:map(fun({Enum, _Descr}) ->
       case lists:keyfind(Enum, 2, Messages) of
@@ -468,7 +553,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
                 sqpad(atom_name(FName,State),MWDe), ", ", Res, "), I+1, U);\n"
             ]
           end, Flds),
-          "decode_msg_", spad(MsgName, MWD), "([{K,V}|T], R, I, U) ", spad("", MFW+9), " -> decode_msg_", MsgName, "([{K,V,undefined,undefined}|T], R, I, U);\n",
+          "decode_msg_", spad(MsgName, MWD), "([{K,V}|T], R, I, U) ", spad("", MFW+9), " -> decode_msg_", MsgName, "([{K,V,", undef(State), ",", undef(State), "}|T], R, I, U);\n",
           if Msg == header ->
             ["decode_msg_", spad(MsgName, MWD), "(L, R, I, _) -> {R, I, L}.\n\n"];
           true ->
@@ -521,7 +606,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
       || I <- Flds]
   end, Optional),
 
-  [{header, _, _, _HdrFlds} | Msgs] = AllMsgs =
+  [{header, _, _, HdrFlds} | Msgs] = AllMsgs =
     lists:map(fun({M,T,C,FF}) ->
       {M, T, C, split_req_and_opt_fields(FF, maps:get(M, Mandatory, []), maps:get(M, Optional, []))}
     end, [Header | Messages]),
@@ -540,7 +625,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
   %  lists:max([length(atom_to_list(group_name(G))) || G <- GrpNames]),
 
   Name2ID  = fun(N) -> maps:get(N, NameMap) end,
-  %AdminHdr = [create_rec(header, "", HdrFlds, State, MaxReqFldLen, MaxIDLen, Name2ID)],
+  AdminHdr = [create_rec(header, "", HdrFlds, State, MaxReqFldLen, MaxIDLen, Name2ID)],
   AdminOut = [create_rec(M, Tp, FF, State, MaxReqFldLen, MaxIDLen, Name2ID) || {M, Tp, admin, FF} <- Msgs],
   AppOut   = [create_rec(M, Tp, FF, State, MaxNLen, MaxIDLen, Name2ID)      || {M, Tp, app,   FF} <- Msgs],
 
@@ -548,8 +633,8 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
     "-include_lib(\"fix/include/fix.hrl\").\n",
     "-include(\"", add_variant_suffix("fix_adm_msgs.hrl", State), "\").\n",
     "-include(\"", add_variant_suffix("fix_app_msgs.hrl", State), "\").\n"
-    %"\n" |
-    %AdminHdr
+    "\n" |
+    AdminHdr
   ],
 
   SFX /= "" andalso
@@ -581,7 +666,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
             GA = sqpad(G, MaxNLen+2),
             %%GN = spad(group_name(G),  MaxGrpLen),
             MN = sqpad(Msg, MaxMsgLen),
-            ["decode_group(", MN, ", ", GA, ", L) -> decode_", atom_to_list(Msg), "_", atom_to_list(group_name(G)), "(L, undefined, #group{name=", sq(G), "});\n"]
+            ["decode_group(", MN, ", ", GA, ", L) -> decode_", atom_to_list(Msg), "_", atom_to_list(group_name(G)), "(L, ", undef(State), ", #group{name=", sq(G), "});\n"]
           end, AllGrps),
           "decode_group(_, _, _) -> false.\n\n",
           lists:map(fun({Msg, G, FF}) ->
@@ -590,7 +675,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
             ML = lists:max([length(atom_to_list(F)) || {F, _ID, _Req, _IsGrp} <- FF])+2,
             [
               "%% Parse Group: ", GN, " in message ", atom_to_list(Msg), "\n",
-              "decode_",  FN, "(L, R) -> decode_", FN, "(L, undefined, R).\n",
+              "decode_",  FN, "(L, R) -> decode_", FN, "(L, ", undef(State), ", R).\n",
               "decode_",  FN, "([{", spad("Delim",ML+2), ",_,_,_}|_]=L, Delim, R) -> {L, R};\n",
               [[
                 "decode_",  FN, "([{", spad(sq(F)++"=H", ML+2), ",V,_,_}|T], Delim, #group{fields=F} = R) ->"
@@ -601,6 +686,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
           end, AllGrps),
           "\n"
           "def(undefined,N) -> N;\n"
+          "def(", undef(State), ",N) -> N;\n"
           "def(Other,   _N) -> Other.\n"
         ]),
   ok.
@@ -852,7 +938,7 @@ split_req_and_opt_fields(Fields, MandFields, OptFields) ->
     Name  = get_attr(name,A),
     IsOpt = lists:member(Name, OptFields),
     IsReq = lists:member(Name, MandFields),
-    Req   = case {IsOpt, IsReq} of 
+    Req   = case {IsOpt, IsReq} of
               {true, _} -> false;
               {_, true} -> add;
               _         -> get_attr(required,A)
@@ -951,7 +1037,7 @@ create_rec(Name, MsgTp, MsgFields, State, Margin, MaxIDLen, Name2ID) ->
               iif(IsGrp," => #{}      ",
                         case Name == header andalso lists:member(N, ["PossDupFlag", "PossResend"]) of
                           true  -> " => false    ";
-                          false -> " => undefined"
+                          false -> [" => ", undef(State)]
                         end),
               " %% Tag# ", string:pad(ID, MaxIDLen, leading),
               iif(IsGrp," (GroupLen: "++N++")", ""), "\n"]
@@ -1033,6 +1119,9 @@ atom_name(N, S)                     when is_atom(N) -> atom_name(atom_to_list(N)
 atom_name(N, #state{elixir = true}) when is_list(N) -> "Elixir." ++ N;
 atom_name(N, _)                     when is_list(N) -> N.
 
+%undef(#state{elixir = true}) -> "nil";
+undef(_)                     -> "nil".
+
 qname(N, #state{} = S) ->
   "'"++atom_name(N,S)++"'".
 
@@ -1100,6 +1189,8 @@ get_fix_variant(#state{variant=V})  -> V.
 add_variant_suffix(File, #state{variant=V}) when V==""; V=="default" ->
   File;
 add_variant_suffix(File, #state{var_sfx=Sfx}) ->
+  add_variant_suffix(File, Sfx);
+add_variant_suffix(File, Sfx) when is_list(Sfx) ->
   Ext  = filename:extension(File),
   Base = filename:basename(File, Ext),
   Base ++ Sfx ++ Ext.

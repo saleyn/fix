@@ -29,7 +29,7 @@
 //------------------------------------------------------------------------------
 // Static variables
 //------------------------------------------------------------------------------
-static ERL_NIF_TERM am_undefined;
+static ERL_NIF_TERM am_nil;
 static ERL_NIF_TERM am_true;
 static ERL_NIF_TERM am_false;
 static ERL_NIF_TERM am_ok;
@@ -856,7 +856,7 @@ inline ERL_NIF_TERM
 Field::decode(ErlNifEnv* env, const char* code, int len)
 {
   if (!m_decf || len < 1 || len > m_max_val_len) [[unlikely]]
-    return am_undefined;
+    return am_nil;
 
   assert(m_decf);
 
@@ -1030,7 +1030,7 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
     m_variants_map.emplace(std::make_pair(am, m_variants.back().get()));
   }
 
-  am_undefined = make_atom("undefined");
+  am_nil       = make_atom("nil");
   am_true      = make_atom("true");
   am_false     = make_atom("false");
   am_ok        = make_atom("ok");
@@ -1378,7 +1378,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         }
 
         tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
-            ? field->get_atom() : am_undefined;
+            ? field->get_atom() : am_nil;
 
         assert(*p == '=');
         tag_begin = tag_end = ++p; // Skip '='
@@ -1488,8 +1488,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         assert(field);
 
         value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
-                                    : am_undefined;
-        if (value == am_undefined) {
+                                    : am_nil;
+        if (value == am_nil) {
           auto len = p - ptr;
           if (ret_binary) {
             auto data = enif_make_new_binary(env, len, &value);
@@ -1535,7 +1535,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
         value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
                                     : enif_make_int(env, (int)*ptr);
-        if (value == am_undefined)
+        if (value == am_nil)
           enif_make_int(env, (int)*ptr);
 
         break;

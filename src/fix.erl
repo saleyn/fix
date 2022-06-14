@@ -3,7 +3,6 @@
 %% @doc Main module for fix usage.
 %%
 -module(fix).
--include("../include/fix.hrl").
 
 -export([split/2, split/3, tag_to_field/2, field_to_tag/2]).
 -export([decode_field_value/3, encode_field_value/3, list_field_values/2]).
