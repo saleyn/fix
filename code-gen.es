@@ -252,7 +252,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
             "    return make_all_fields(fvar);\n"
             "  }\n\n"
             "  const char* get_fix_variant_name() { return \"", get_fix_variant(State), "\"; }\n"
-            "}\n\n"
+            "}\n"
            ]),
   %% Generate fix_fields.erl
   MID = length(integer_to_list(lists:max([ID || {ID, _} <- FldList]))),
@@ -362,8 +362,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
          []
        end
       ]
-    end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
-    "\n"
+    end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []]
   ]),
   FN3 = add_variant_suffix("fix", State, "codec"),
   ok  = write_file(erlang, src, State, FN3++".erl", [], [
@@ -1081,7 +1080,7 @@ create_rec(Name, MsgTp, MsgFields, State, Margin, MaxIDLen, Name2ID) ->
     true ->
       []
     end,
-    "}).\n\n"
+    "}).\n"
   ].
 
 %%------------------------------------------------------------------------------
