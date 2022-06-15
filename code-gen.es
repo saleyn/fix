@@ -368,15 +368,20 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   ok  = write_file(erlang, src, State, FN3++".erl", [], [
     "%% @doc Interface module for the FIX ", State#state.variant, " variant\n\n"
     "-module(", FN3, ").\n"
+    "-export([decode/1, split/1, encode/2]).\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
-    "-include_lib(\"fix/include/fix.hrl\").\n"
+    "-include(\"", FN3++".hrl\").\n"
     "\n"
     "-define(FIX_VARIANT,         ", nvl(State#state.variant, "default"), ").\n"
     "-define(FIX_DECODER_MODULE,  ", add_variant_suffix("fix_decoder", State), ").\n"
     "-define(FIX_ENCODER_MODULE,  ", add_variant_suffix("fix_fields", State), ").\n"
     "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
     "\n"
+    "%% @see decode/3.\n"
+    "decode(Bin)          -> decode(Bin, [binary]).\n\n"
+    "%% @see decode/3.\n"
+    "decode(Bin, Options) -> decode(nif, Bin, Options).\n\n"
     "%% @doc Parse the first FIX message in the Bin.\n"
     "%% The function returns\n"
     "%% `{ok, BinRest, {MatchedFldCount, Header, Msg, UnparsedFields}}', where\n"
@@ -389,32 +394,44 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "       {MsgType::atom(), Msg::map()}, UnparsedFields::list()}}\n"
     "   | {more, non_neg_integer()}\n"
     "   | error.\n"
-    "decode(Mode, Bin, Options) ->\n"
+    "decode(Mode, Bin, Options) when is_binary(Bin), is_list(Options) ->\n"
     "  fix_util:decode(Mode, ?FIX_DECODER_MODULE, ?FIX_VARIANT, Bin, Options).\n"
-    "\n"
-    "decode(Mode, Bin) ->\n"
-    "  decode(Mode, Bin, []).\n"
     "\n"
     "%% Decodes a list of [{Key, Value}] pairs to a FIX message.\n"
     "%% Use after splitting the message with split/1\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
     "  ?FIX_DECODER_MODULE:decode_msg(Msg).\n"
     "\n"
-    "split(Mode, Bin) -> split(Mode, Bin, []).\n\n"
+    "split(Bin) -> split(nif,  Bin, [binary]).\n\n"
+    "%% @doc Split a FIX binary message to a list of key-value fields\n"
+    "split(Mode, Bin) when is_atom(Mode)  -> split(Mode, Bin, [binary]);\n"
+    "split(Bin, Opts) when is_binary(Bin) -> split(nif,  Bin, Opts).\n\n"
     "-spec split(nif|native, binary(), [binary|full]) ->\n"
     "        [{atom(), binary()|{integer(),integer()}, any(), {integer(),integer()}}].\n"
-    "split(Mode, Bin, Opts) ->\n"
+    "split(Mode, Bin, Opts) when is_atom(Mode), is_binary(Bin), is_list(Opts) ->\n"
     "  fix_util:split(Mode, ?FIX_VARIANT, Bin, Opts).\n"
     "\n"
-    "-spec encode(nif|native, Header::map(), {atom(), map()}) -> binary().\n"
-    "encode(Mode, Hdr =\n"
+
+    "-spec encode(#header{}, #fix{}) -> binary().\n"
+    "encode(#header{fields=H}, #fix{msgtype=MsgType, fields=Msg}) ->\n"
+    "  encode(nif, MsgType, H, Msg);\n"
+    "encode(Hdr, #fix{msgtype=MsgType, fields=Msg}) when is_map(Hdr) ->\n"
+    "  encode(nif, MsgType, Hdr, Msg).\n\n"
+
+    "-spec encode(nif|native, map()|#header{}, #fix{}) -> binary().\n"
+    "encode(Mode, #header{fields=H}, #fix{msgtype=MT, fields=Msg}) ->\n"
+    "  encode(Mode, MT, H, Msg);\n"
+    "encode(Mode, Hdr, #fix{msgtype=MT, fields=Msg}) when is_map(Hdr) ->\n"
+    "  encode(Mode, MT, Hdr, Msg).\n\n"
+
+    "-spec encode(nif|native, MsgType::atom(), map(), map()) -> binary().\n"
+    "encode(Mode, MsgType, Hdr =\n"
     "      #{\n"
     "        ", sq(atom_name('MsgSeqNum', State)), "    := SeqNum,\n"
     "        ", sq(atom_name('SenderCompID', State)), " := Sender,\n"
     "        ", sq(atom_name('TargetCompID', State)), " := Target\n"
     "      },\n"
-    "      {MsgName, Msg} = _Msg)\n"
-    "->\n"
+    "      Msg) when is_map(Msg) ->\n"
     "  Hdr0    = maps:without([\n"
     "             ", sq(atom_name('BeginString',State)), ", "
                    , sq(atom_name('MsgSeqNum',  State)), ",\n"
@@ -430,7 +447,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  MsgFlds = [KV || KV = {_,V} <- maps:to_list(Msg), V /= ", undef(State), "],\n"
     "  Fields  = HdrFlds ++ MsgFlds,\n"
     "  Body    = [\n"
-    "    {", sq(atom_name('MsgType',      State)), ", MsgName},\n"
+    "    {", sq(atom_name('MsgType',      State)), ", MsgType},\n"
     "    {", sq(atom_name('SenderCompID', State)), ", Sender},\n"
     "    {", sq(atom_name('TargetCompID', State)), ", Target},\n"
     "    {", sq(atom_name('MsgSeqNum',    State)), ", SeqNum},\n"
@@ -501,21 +518,19 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     "-module(", FNm, ").\n"
     "-export([decode_msg/1, decode_msg/2, field/1]).\n\n",
     if SFX == "" ->
-      ["-include(\"fix.hrl\").\n"
-       "-include(\"", add_variant_suffix("fix_adm_msgs.hrl", State), "\").\n"
-       "-include(\"", add_variant_suffix("fix_app_msgs.hrl", State), "\").\n"];
+      ["-include(\"fix.hrl\").\n"];
     true ->
       ["-include(\"", add_variant_suffix("fix.hrl", State), "\").\n"]
     end,
     "\n"
-    "-define(MAP_SET(_R, _M, _F, _V), _R#_M{fields = (R#_M.fields)#{_F => _V}}).\n"
+    "-define(MAP_SET(_R, _F, _V), _R#fix{fields = (R#fix.fields)#{_F => _V}}).\n"
     "\n"
     "field(N) -> ", add_variant_suffix("fix_fields", State), ":field(N).\n\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
-    "  case decode_msg_header(Msg, #header{}, 0, []) of\n"
-    "    {#header{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
-    "      {M, I1, U} = decode_msg(MT, L),\n"
-    "      {I1, H, M, U};\n"
+    "  case decode_msg_header(Msg, #fix{}, 0, []) of\n"
+    "    {#fix{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
+    "      {#fix{} = M, I1, U} = decode_msg(MT, L),\n"
+    "      {I1, M#fix{header=H}, U};\n"
     "    _ ->\n"
     "      false\n"
     "  end.\n"
@@ -527,7 +542,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
         {Msg, _Type, _Cat, _Fields} ->
           [
             "decode_msg(", sqpad(atom_name(Msg,State), MTW+2), ",L)", spad("", MTW),
-            " -> ", ["decode_msg_", spad(Msg,MTW), "(L, #", sq(atom_name(Msg,State)), "{}, 0, []);\n"]
+            " -> ", ["decode_msg_", spad(Msg,MTW), "(L, #fix{msgtype=", sq(atom_name(Msg,State)), "}, 0, []);\n"]
           ]
       end
     end, MsgTypes),
@@ -565,7 +580,6 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
               "decode_msg_", spad(MsgName, MWD), "([{", sqpad(atom_name(FName,State),MWDe), ", ", Val, ",_Tag,_Pos}|T], R, I, U) ->",
               Add,
               " decode_msg_", MsgName, "(", Var, ", ?MAP_SET(R, ",
-                sq(iif(MsgName=="header", MsgName, atom_name(MsgName,State))), ", ",
                 sqpad(atom_name(FName,State),MWDe), ", ", Res, "), I+1, U);\n"
             ]
           end, Flds),
@@ -647,8 +661,6 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
 
   FixHRL = [
     "-include_lib(\"fix/include/fix.hrl\").\n",
-    "-include(\"", add_variant_suffix("fix_adm_msgs.hrl", State), "\").\n",
-    "-include(\"", add_variant_suffix("fix_app_msgs.hrl", State), "\").\n"
     "\n" |
     AdminHdr
   ],
