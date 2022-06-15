@@ -256,10 +256,10 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
            ]),
   %% Generate fix_fields.erl
   MID = length(integer_to_list(lists:max([ID || {ID, _} <- FldList]))),
-  FN2 = add_variant_suffix("fix_fields", State),
   Dsc = iif(State#state.variant=="", "", " " ++ State#state.variant),
-  ok  = write_file(erlang, src, State, add_variant_suffix("fix.app", State)++".src", [], [
-    "{application, fix", SFX, ",\n"
+  ANm = add_variant_suffix("fix", State),
+  ok  = write_file(erlang, src, State, ANm++".app.src", [], [
+    "{application, ", ANm, ",\n"
     "[\n"
     "  {description, \"", nvl(State#state.app_descr, ["FIX", Dsc, " library"]), "\"},\n"
     "  {vsn, \"1.0\"},\n"
@@ -268,6 +268,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  {env, [{config, []}]}\n"
     "]}.\n"
   ], false),
+  FN2 = add_variant_suffix("fix_fields", State),
   ok  = write_file(erlang, src, State, FN2++".erl", [], [
     "-module(", FN2, ").\n"
     "-export([field/1, field_tag/1, encode_msg/2]).\n\n"
@@ -364,8 +365,9 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
     "\n"
   ]),
-  ok = write_file(erlang, src, State, add_variant_suffix("fix_codec.erl", State), [], [
-    "-module(fix_codec", SFX, ").\n"
+  FN3 = add_variant_suffix("fix_codec", State),
+  ok  = write_file(erlang, src, State, FN3++".erl", [], [
+    "-module(", FN3, ").\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
     "-include_lib(\"fix/include/fix.hrl\").\n"
@@ -652,12 +654,13 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
   ],
 
   SFX /= "" andalso
-    (ok = write_file(erlang, inc, State, add_variant_suffix("fix.hrl", State), ["%% Common include for FIX ", State#state.variant, " variant\n"], FixHRL)),
-  ok = write_file(erlang, inc, State, add_variant_suffix("fix_adm_msgs.hrl", State), ["%% Administrative FIX messages\n"], AdminOut),
-  ok = write_file(erlang, inc, State, add_variant_suffix("fix_app_msgs.hrl", State), ["%% Application FIX messages\n"],    AppOut),
-  ok = write_file(erlang, src, State, add_variant_suffix("fix_groups.erl",   State), ["%% Metadata about FIX groups\n"],
+    (ok=write_file(erlang, inc, State, add_variant_suffix("fix.hrl", State), ["%% Common include for FIX ", State#state.variant, " variant\n"], FixHRL)),
+  ok  = write_file(erlang, inc, State, add_variant_suffix("fix_adm_msgs.hrl", State), ["%% Administrative FIX messages\n"], AdminOut),
+  ok  = write_file(erlang, inc, State, add_variant_suffix("fix_app_msgs.hrl", State), ["%% Application FIX messages\n"],    AppOut),
+  FN4 = add_variant_suffix("fix_groups", State),
+  ok  = write_file(erlang, src, State, FN4++".erl", ["%% Metadata about FIX groups\n"],
         [
-          "-module(fix_groups", SFX, ").\n\n",
+          "-module(", FN4, ").\n\n",
           "-include(\"", add_variant_suffix("fix.hrl", State), "\").\n"
           "\n"
           "-export([\n",
