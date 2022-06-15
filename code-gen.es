@@ -365,8 +365,9 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
     "\n"
   ]),
-  FN3 = add_variant_suffix("fix_codec", State),
+  FN3 = add_variant_suffix("fix", State, "codec"),
   ok  = write_file(erlang, src, State, FN3++".erl", [], [
+    "%% @doc Interface module for the FIX ", State#state.variant, " variant\n\n"
     "-module(", FN3, ").\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
@@ -1208,6 +1209,11 @@ abort(Fmt, Opts / []) ->
 
 get_fix_variant(#state{variant=""}) -> "default";
 get_fix_variant(#state{variant=V})  -> V.
+
+add_variant_suffix(File, #state{variant=V}, Def) when V==""; V=="default" ->
+  File ++ "_" ++ Def;
+add_variant_suffix(File, State, _Def) ->
+  add_variant_suffix(File, State).
 
 add_variant_suffix(File, #state{variant=V}) when V==""; V=="default" ->
   File;
