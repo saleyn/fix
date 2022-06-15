@@ -6,6 +6,7 @@
 %%% by size.
 %%%
 %%% @author Serge Aleynikov <saleyn@gmail.com>
+%%% @copyright 2009 Serge Aleynikov
 %%% @end
 %%%-----------------------------------------------------------------------------
 %%% Created: 2009-12-02
