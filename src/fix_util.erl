@@ -85,6 +85,11 @@ dumpstr(Encoded) ->
 %% @doc Find all known FIX variants `*.so' NIF libraries.
 -spec find_variants() -> [string()].
 find_variants() ->
+  Priv = code:priv_dir(fix),
+  is_list(Priv) orelse
+    error("Cannot locate priv directory of the 'fix' application"),
+  Root = filename:dirname(filename:dirname(Priv)),
+
   %% Get the list of supported FIX variants to load. These should be either
   %% directory names containing `*.so' files, or the full `*.so' file names
   %% or application names in which the `priv' dirs will be searched for
@@ -108,12 +113,16 @@ find_variants() ->
           true ->
             case code:priv_dir(V) of
               {error, _} ->
-                throw("Undefined priv directory of application: ~w", [V]);
+                error("Undefined priv directory of application: ~w", [V]);
               Dir ->
                 {false, filename:join(Dir, "fix_fields*.so")}
             end;
           false ->
-            throw("Fix variant application '~w' is not known!", [V])
+            Dir = filename:join([Root, atom_to_list(V), "priv"]),
+            case filelib:is_dir(Dir) of
+              true  -> {false, filename:join(Dir, "fix_fields*.so")};
+              false -> error("Fix variant application '~w' is not known!", [V])
+            end
         end;
       is_list(V); is_binary(V) ->
         IsDir   = filelib:is_dir(V),
@@ -125,10 +134,10 @@ find_variants() ->
         IsFile; IsWild ->
           {IsWild, Val};
         true ->
-          throw("File/Dir name '~s' not found!", [Val])
+          error("File/Dir name '~s' not found!", [Val])
         end;
       true ->
-        throw("Invalid argument in fix.fix_variants: ~p", [V])
+        error("Invalid argument in fix.fix_variants: ~p", [V])
       end,
     case filelib:wildcard(Msk) of
       [] when not NoWarning ->
