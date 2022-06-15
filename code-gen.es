@@ -373,8 +373,8 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "-include_lib(\"fix/include/fix.hrl\").\n"
     "\n"
     "-define(FIX_VARIANT,         ", nvl(State#state.variant, "default"), ").\n"
-    "-define(FIX_DECODER_MODULE,  fix_decoder", SFX, ").\n"
-    "-define(FIX_ENCODER_MODULE,  fix_fields", SFX, ").\n"
+    "-define(FIX_DECODER_MODULE,  ", add_variant_suffix("fix_decoder", State), ").\n"
+    "-define(FIX_ENCODER_MODULE,  ", add_variant_suffix("fix_fields", State), ").\n"
     "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
     "\n"
     "%% @doc Parse the first FIX message in the Bin.\n"
@@ -510,7 +510,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     "\n"
     "-define(MAP_SET(_R, _M, _F, _V), _R#_M{fields = (R#_M.fields)#{_F => _V}}).\n"
     "\n"
-    "field(N) -> fix_fields", SFX, ":field(N).\n\n"
+    "field(N) -> ", add_variant_suffix("fix_fields", State), ":field(N).\n\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
     "  case decode_msg_header(Msg, #header{}, 0, []) of\n"
     "    {#header{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
@@ -558,7 +558,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
             QGN   = iif(IsGrp, GN, sq(GN)),
             {Var, Val, Res, Add} =
               case GrpOrFld of
-                group -> {"L", "N", "G", [" {G,L} = forgrp(",QGN,", N, T, fun ","fix_groups",SFX,":decode_", MsgName, "_", GN, "/2),"]};
+                group -> {"L", "N", "G", [" {G,L} = forgrp(",QGN,", N, T, fun ",add_variant_suffix("fix_groups",State),":decode_", MsgName, "_", GN, "/2),"]};
                 field -> {"T", "V", "V", []}
               end,
             [
