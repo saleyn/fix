@@ -368,7 +368,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   ok  = write_file(erlang, src, State, FN3++".erl", [], [
     "%% @doc Interface module for the FIX ", State#state.variant, " variant\n\n"
     "-module(", FN3, ").\n"
-    "-export([decode/1, split/1, encode/2]).\n"
+    "-export([decode/1, split/1, encode/1, encode/2]).\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
     "-include(\"", FN3++".hrl\").\n"
@@ -412,6 +412,9 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  fix_util:split(Mode, ?FIX_VARIANT, Bin, Opts).\n"
     "\n"
 
+    "-spec encode(#fix{}) -> binary().\n"
+    "encode(#fix{msgtype=MsgType, header = #header{fields=H}, fields=Msg}) ->\n"
+    "  encode(nif, MsgType, H, Msg).\n\n"
     "-spec encode(#header{}, #fix{}) -> binary().\n"
     "encode(#header{fields=H}, #fix{msgtype=MsgType, fields=Msg}) ->\n"
     "  encode(nif, MsgType, H, Msg);\n"
