@@ -42,6 +42,7 @@
   app_descr= "",
   version,
   variants = [],      %% FIX Variant Name
+  file_sfx,
   variant  = "",      %% FIX Variant Name (required argument)
   var_pfx  = "",      %% FIX variant prefix in lower case
   var_sfx  = "",      %% FIX variant suffix in lower case
@@ -363,7 +364,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []],
     "\n"
   ]),
-  ok = write_file(erlang, src, State, add_variant_suffix("fix_codec.erl", SFX), [], [
+  ok = write_file(erlang, src, State, add_variant_suffix("fix_codec.erl", State), [], [
     "-module(fix_codec", SFX, ").\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
@@ -711,6 +712,7 @@ parse(["-cr", CR | T], S) -> parse(T, S#state{copyrt   =  CR});
 parse(["-ad", AD | T], S) -> parse(T, S#state{app_descr=  AD});
 parse(["-vsn", V | T], S) -> parse(T, S#state{version  =   V});
 parse(["-vars",V | T], S) -> parse(T, S#state{variants =   V});
+parse(["-sfx", V | T], S) -> parse(T, S#state{file_sfx =   V});
 parse(["-var", V | T], S) -> V1 = string:to_lower(V),
                              parse(T, S#state{variant  = V1,
                                               var_pfx  = V1++"_",
@@ -815,6 +817,7 @@ usage() ->
     "     -e                  - Use Elixir atom prefixing\n"
     "     -ge                 - Generate Erlang code only\n"
     "     -gc                 - Generate C++ code only\n"
+    "     -sfx  FileSfx       - Suffix to add to generated filenames (default: Variant)\n"
     "     -var  Variant       - FIX Variant name (this is a required argument)\n"
     "     -cdir Path          - Output directory for C++ files    (default: ./c_src)\n"
     "     -edir Path          - Output directory for Erlang files (default: ./src)\n"
@@ -1205,6 +1208,8 @@ get_fix_variant(#state{variant=V})  -> V.
 
 add_variant_suffix(File, #state{variant=V}) when V==""; V=="default" ->
   File;
+add_variant_suffix(File, #state{file_sfx=V}) when V /= undefined, V /= "" ->
+  add_variant_suffix(File, "_"++V);
 add_variant_suffix(File, #state{var_sfx=Sfx}) ->
   add_variant_suffix(File, Sfx);
 add_variant_suffix(File, Sfx) when is_list(Sfx) ->
@@ -1247,7 +1252,7 @@ copy_makefile(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath}) ->
     false ->
       DstFile = filename:join(CppPath, "Makefile"),
       SrcFile = filename:join(IncDir,  "Makefile"),
-      io:format("Writing file: ~s\n", [DstFile]),
+      io:format("Writing file:  ~s\n", [DstFile]),
       {ok,F}  = file:read_file(SrcFile),
       Data    = re:replace(F, "INC_DIR\\s*:=[^\n]+", "INC_DIR := -I" ++ IncDir ++ "\n",
                            [{return, binary}]),
