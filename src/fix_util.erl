@@ -57,7 +57,7 @@ decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
       {ok, MsgLen, Msg} when MsgLen == byte_size(Bin) ->
         {ok, <<>>, CodecMod:decode_msg(Msg)};
       {ok, MsgLen, Msg} ->
-        <<_:MsgLen/binary, Rest>> = Bin,
+        <<_:MsgLen/binary, Rest/binary>> = Bin,
         {ok, Rest, CodecMod:decode_msg(Msg)};
       {error, {_Why, _Pos, _Tag}} = R ->
         R;
@@ -76,7 +76,7 @@ dump(IOList) when is_list(IOList) ->
 
 -spec undump(binary()) -> binary().
 undump(Bin) when is_binary(Bin) ->
-  binary:replace(Bin, <<"|">>, <<1>>, [global]).
+  binary:replace(Bin, [<<"|">>,<<$^,$A>>], <<1>>, [global]).
 
 -spec dumpstr(binary() | iolist()) -> ok.
 dumpstr(Encoded) ->
@@ -153,7 +153,7 @@ find_variants() ->
 
 
 do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
-do_split(native, CodecMod, _Variant, Bin,_Opts) -> fix_native:split(CodecMod, Bin).
+do_split(native, CodecMod, _Variant, Bin, Opts) -> fix_native:split(CodecMod, Bin, Opts).
 
 split(nif,    Variant,  Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
 split(native, CodecMod, Bin,_Opts) -> fix_native:split(CodecMod, Bin).

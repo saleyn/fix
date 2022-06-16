@@ -8,22 +8,32 @@
 %%------------------------------------------------------------------------------
 -module(fix_native).
 
--export([split/2, encode_field/3, decode_field/3, decode_field/4]).
+-export([split/2, split/3, encode_field/3, decode_field/3, decode_field/4]).
 
 -compile({parse_transform, ct_expand}). %% See parse_trans library
 
+split(DecoderMod, Bin) -> split(DecoderMod, Bin, []).
+
 %% @doc Split a FIX binary message
 %% `DecoderMod' - implementation module for field decoding
-split(DecoderMod, Bin = <<"8=FIX", _/binary>>) ->
+split(DecoderMod, Bin = <<"8=FIX", _/binary>>, Opts) ->
   case binary:match(Bin, [<<1>>,<<$|>>]) of
-    {I,1} -> split(DecoderMod, Bin, binary:at(Bin, I));
-    _     -> {error, {missing_soh, 0, 8}}
+    {I,1} ->
+      IsFull = lists:member(full, Opts),
+      case split2(DecoderMod, Bin, binary:at(Bin, I)) of
+        Res = {ok, _Len, _Msgs} when IsFull ->
+          Res;
+        {ok, Len, Msg} ->
+          [F || F <- Msg, filter_field(element(1, F))]
+      end;
+    _ ->
+      {error, {missing_soh, 0, 8}}
   end.
 
-split(DecoderMod, Bin,  1) ->
-  split2(DecoderMod, Bin,  1, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^\1]+)\1">>))));
-split(DecoderMod, Bin, $|) ->
-  split2(DecoderMod, Bin, $|, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^|]+)\\|">>)))).
+split2(DecoderMod, Bin,  1) ->
+  split3(DecoderMod, Bin,  1, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^\1]+)\1">>))));
+split2(DecoderMod, Bin, $|) ->
+  split3(DecoderMod, Bin, $|, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^|]+)\\|">>)))).
 
 decode_field(DecoderMod, T={_,_}, V={_,_}, Bin) ->
   Tag = binary:part(Bin, T),
@@ -66,7 +76,15 @@ encode_field(Codec, Tag, Val) when is_atom(Codec), is_atom(Tag) ->
   {_Num, _Type, Fun} = Codec:field_tag(Tag),
   Fun(Val).
 
-split2(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) ->
+filter_field('Elixir.BeginString') -> false;
+filter_field('BeginString')        -> false;
+filter_field('Elixir.BodyLength')  -> false;
+filter_field('BodyLength')         -> false;
+filter_field('Elixir.CheckSum')    -> false;
+filter_field('CheckSum')           -> false;
+filter_field(_)                    -> true.
+
+split3(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) ->
   case binary:match(Bin, <<Delim, "9=">>) of
     {I,N} when byte_size(Bin) > I+N+10 ->
       M = I+N,
@@ -85,7 +103,7 @@ split2(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) 
       {more, 25}
   end.
 
-split2(DecoderMod, Bin, Delim) when is_atom(DecoderMod) ->
+split3(DecoderMod, Bin, Delim) when is_atom(DecoderMod) ->
   case binary:match(Bin, <<Delim, "9=">>) of
     {I,N} when byte_size(Bin) > I+N+10 ->
       M = I+N,
