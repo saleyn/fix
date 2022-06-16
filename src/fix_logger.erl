@@ -82,6 +82,7 @@
 -record(state, {
   fd,                                           %% term(), file descriptor
   prefix=""     :: string(),                    %% Prefix for logged messages
+  logpfx        :: string(),                    %% Prefix for the logger:*/2
   fname         :: string(),                    %% file name
   fname_mask    :: string(),                    %% file name source mask
   %% Execute this fun or write to file on creating a new file
@@ -195,8 +196,10 @@ init(Opts) ->
     Keep    = maps:get(keep_files, Opts, 5),
     Pfx     = case maps:get(prefix,Opts) of
                 none -> "";
+                ""   -> "";
                 Str  -> to_list(Str)
               end,
+    LogPfx  = if Pfx == "" -> ""; true -> Pfx ++ ": " end,
     (is_list(Vars)
       andalso lists:foldl(fun({K,V}, A) ->
                             A and is_atom(K) and is_string(V)
@@ -220,7 +223,8 @@ init(Opts) ->
     Vars1 = [{K, to_list(V)} || {K,V} <- Vars],
 
     {ok, #state{fname_mask=File, on_new=OnNew, utc=UTC, dir_fun=Dir,
-                rotate=Rotate, vars=Vars1, keep_files=Keep, prefix=Pfx}}
+                rotate=Rotate, vars=Vars1, keep_files=Keep,
+                prefix=Pfx, logpfx=LogPfx}}
   catch throw:Err:ST ->
     Error = "Error starting logger: " ++ Err,
     erlang:raise(error, Error, ST)
@@ -293,7 +297,7 @@ handle_cast(close, #state{fd=IO} = State) ->
   file:close(IO),
   {noreply, State#state{fd=undefined}};
 
-handle_cast(Other, #state{prefix=Pfx} = State) ->
+handle_cast(Other, #state{logpfx=Pfx} = State) ->
   ?LOG_ERROR("~sunhandled cast: ~p", [Pfx, Other]),
   {noreply, State}.
 
@@ -307,8 +311,8 @@ handle_cast(Other, #state{prefix=Pfx} = State) ->
 %% @end
 %% @private
 %%------------------------------------------------------------------------------
-handle_info(Msg, #state{prefix=Pfx} = State) ->
-  ?LOG_ERROR("~w: unhandled message: ~p", [Pfx, Msg]),
+handle_info(Msg, #state{logpfx=Pfx} = State) ->
+  ?LOG_ERROR("~sunhandled message: ~p", [Pfx, Msg]),
   {noreply, State}.
 
 %%------------------------------------------------------------------------------
@@ -446,7 +450,7 @@ safe_write_file(DateTime, Dir, Data, #state{prefix=Pfx, dir_fun=DF} = State) ->
   DirL = dir(DF, Dir),
   do_write(State, [Time, Pfx, DirL, Data]).
 
-do_write(State = #state{fd=Dev, prefix=Pfx}, Data) ->
+do_write(State = #state{fd=Dev, logpfx=Pfx}, Data) ->
   case file:write(Dev, Data) of
     ok ->
       State;
@@ -462,7 +466,7 @@ do_write(State = #state{fd=Dev, prefix=Pfx}, Data) ->
 %% @end
 %%------------------------------------------------------------------------------
 -spec filename(Now::integer(), #state{}) -> string().
-filename(Now, #state{fname_mask=Fname, utc=UTC, prefix=Pfx, vars=Bindings}) ->
+filename(Now, #state{fname_mask=Fname, utc=UTC, logpfx=Pfx, vars=Bindings}) ->
   {DT,_} = split_time(Now, UTC),
   File = replace(Fname, DT, Bindings),
   case filelib:ensure_dir(File) of
@@ -508,7 +512,7 @@ i2b3(I) when I < 1000 -> integer_to_binary(I).
 i2lp(I) when I < 10   -> [$0, $0+I];
 i2lp(I)               -> integer_to_list(I).
 
-rotate_files(RotType, #state{prefix=Pfx, keep_files=Keep, fname_mask=Fname}=S) ->
+rotate_files(RotType, #state{logpfx=Pfx, keep_files=Keep, fname_mask=Fname}=S) ->
   case RotType of
     size ->
       File      = S#state.fname,
