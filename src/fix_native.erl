@@ -24,7 +24,7 @@ split(DecoderMod, Bin = <<"8=FIX", _/binary>>, Opts) ->
         Res = {ok, _Len, _Msgs} when IsFull ->
           Res;
         {ok, Len, Msg} ->
-          [F || F <- Msg, filter_field(element(1, F))]
+          {ok, Len, [F || F <- Msg, filter_field(element(1, F))]}
       end;
     _ ->
       {error, {missing_soh, 0, 8}}
