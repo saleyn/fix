@@ -364,11 +364,12 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
       ]
     end || {ID, {_Name, Type, _FldOrTag, Vals}} <- lists:sort(FldList), Vals /= []]
   ]),
+  %% Generate `fix_codec*.erl`
   FN3 = add_variant_suffix("fix", State, "codec"),
   ok  = write_file(erlang, src, State, FN3++".erl", [], [
     "%% @doc Interface module for the FIX ", State#state.variant, " variant\n\n"
     "-module(", FN3, ").\n"
-    "-export([decode/1, split/1, encode/1, encode/2]).\n"
+    "-export([decode/1, split/1, encode/1, encode/2, field/1]).\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
     "-include(\"", FN3++".hrl\").\n"
@@ -378,6 +379,12 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "-define(FIX_ENCODER_MODULE,  ", add_variant_suffix("fix_fields", State), ").\n"
     "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
     "\n"
+    "%% @doc Get field's metadata\n"
+    "-spec field(integer()|atom()) ->\n"
+    "  [{id,integer()}|{name,atom()}|{data_type,atom()}|{type,atom()}|\n"
+    "   {values, [{binary(),atom()}]}].\n"
+    "field(id) ->\n"
+    "  fix_nif:field_meta(?FIX_VARIANT, id).\n\n"
     "%% @see decode/3.\n"
     "decode(Bin)          -> decode(Bin, [binary]).\n\n"
     "%% @see decode/3.\n"
@@ -516,7 +523,95 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
 
 generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = State) ->
   {'MsgType', _, _, MsgTypes} = maps:get(35, FldMap),
-  MTW  = lists:max([length(atom_name(Msg,State)) || {Msg, _Type, _Cat, _Fields} <- Messages]),
+  FMNm = add_variant_suffix("fix_meta", State),
+  ok   = write_file(erlang, src, State, FMNm ++ ".erl", [],
+  [
+    "-module(", FMNm, ").\n"
+    "-export([msg_meta/1, msg_meta_by_value/1, is_admin_msg/1, is_app_msg/1]).\n\n",
+    if SFX == "" ->
+      ["-include(\"fix.hrl\").\n"];
+    true ->
+      ["-include_lib(\"fix/include/fix.hrl\").\n"]
+    end,
+
+    lists:map(fun({Enum, Descr}) ->
+      try
+        {Msg, Type, Cat, Fields} = get_msg_info(Enum, Messages),
+
+        DepChk = fun
+          DC({field, A, _}, {I, Max}) ->
+            Name   = get_attr(name, A),
+            Max1   = max(Max, length(atom_to_list(Name))+2+2*I),
+            {I, Max1};
+          DC({group, A, V}, {I, Max}) ->
+            Name   = get_attr(name, A),
+            Max1   = max(Max, length(atom_to_list(Name))+2+2*I),
+            {_, N} = lists:foldl(DC, {I+1, Max1}, V),
+            {I, lists:max([Max1, N])}
+        end,
+
+        {_, MWi} = lists:foldl(DepChk, {0,0}, Fields),
+
+        Fun = fun
+          G(Indent, Flds) ->
+            Pfx = string:copies(" ", 6 + 2*Indent),
+            MW  = integer_to_list(MWi - 2*Indent),
+            string:join(
+              [io_lib:format("~s~-"++MW++"s => #meta{type=~w, required=~-5w, order=~w~s}",
+                [Pfx, sq(atom_to_list(get_attr(name, A))), Tag,
+                  get_attr(required, A) == required, Order,
+                  iif(Tag==group, io_lib:format(", content=#{\n~s\n~s}",
+                      [G(Indent+1, Vals), Pfx]), "")
+                ])
+                || {Order, {Tag, A, Vals}} <- lists:zip(lists:seq(1, length(Flds)), Flds)],
+              ",\n")
+        end,
+
+        io_lib:format("\n~smsg_meta(~w) ->\n  #{\n    type   => \"~s\",\n    kind   => ~w,\n    fields => #{\n~s\n    }\n  };\n",
+          [iif(Descr=="", "", ["%% ", Descr, "\n"]), Msg, Type, Cat, Fun(0, Fields)])
+      catch throw:ignore ->
+        ""
+      end
+    end, [{header, ""} | MsgTypes]),
+    "msg_meta(M) -> erlang:raise(\"Unknown message \" ++ atom_to_list(M)).\n\n",
+
+    align_table(
+      lists:map(fun({Enum, _Descr}) ->
+        try
+          {Msg, Type, _Cat, _Fields} = get_msg_info(Enum, Messages),
+          {str("msg_meta_by_value(~p)", [Type]), str(" -> msg_meta(~w);\n", [Msg])}
+        catch throw:ignore ->
+          <<"">>
+        end
+      end, MsgTypes) ++
+      [{"msg_meta_by_value(S)", " -> erlang:raise(\"Unknown message '\" ++ S ++ \"'\").\n"}]
+    ),
+    "\n",
+
+    align_table(
+      lists:map(fun({Enum, _Descr}) ->
+        try
+          {Msg, _Type, admin, _Fields} = get_msg_info(Enum, Messages),
+          {str("is_admin_msg(~w)", [Msg]), " ->  true;\n"}
+        catch _:_ ->
+          <<"">>
+        end
+      end, MsgTypes) ++
+      [{"is_admin_msg(_)", " -> false.\n"}]
+    ),
+    "\n",
+    align_table(
+      lists:map(fun({Enum, _Descr}) ->
+        try
+          {Msg, _Type, app, _Fields} = get_msg_info(Enum, Messages),
+          {str("is_app_msg(~w)", [Msg]), " ->  true;\n"}
+        catch _:_ ->
+          <<"">>
+        end
+      end, MsgTypes) ++
+      [{"is_app_msg(_)", " -> false.\n"}])
+  ]),
+
   FNm  = add_variant_suffix("fix_decoder", State),
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
   [
@@ -540,23 +635,24 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     "      false\n"
     "  end.\n"
     "\n",
-    lists:map(fun({Enum, _Descr}) ->
-      case lists:keyfind(Enum, 2, Messages) of
-        false ->
-          [];
-        {Msg, _Type, _Cat, _Fields} ->
-          [
-            "decode_msg(", sqpad(atom_name(Msg,State), MTW+2), ",L)", spad("", MTW),
-            " -> ", ["decode_msg_", spad(Msg,MTW), "(L, #fix{msgtype=", sq(atom_name(Msg,State)), "}, 0, []);\n"]
-          ]
-      end
-    end, MsgTypes),
-    "decode_msg(_,", spad("_", MTW+2), ")", spad("", MTW), " -> false.\n"
+    align_table(
+      lists:map(fun({Enum, _Descr}) ->
+        case get_msg_info(Enum, Messages, false) of
+          false ->
+            <<"">>;
+          {Msg, _Type, _Cat, _Fields} ->
+            {lists:flatten("decode_msg("++sq(atom_name(Msg,State))), ", L)", " -> ",
+              "decode_msg_"++atom_to_list(Msg), "(L, ",
+              "#fix{msgtype="++lists:flatten(sq(atom_name(Msg,State)))++"}", ", 0, []);\n"}
+        end
+      end, MsgTypes) ++
+      [{"decode_msg(_,", "_)", " -> ", "false", " ", " ", ".\n"}]
+    ),
     "\n",
     lists:map(fun({Enum, _Descr}) ->
       try
         {Msg, _Type, _Cat, Fields} =
-          case lists:keyfind(Enum, 2, Messages) of
+          case get_msg_info(Enum, Messages, false) of
             false when Enum == header ->
               Header;
             false ->
@@ -1241,6 +1337,20 @@ add_variant_suffix(File, Sfx) when is_list(Sfx) ->
   Ext  = filename:extension(File),
   Base = filename:basename(File, Ext),
   Base ++ Sfx ++ Ext.
+
+-spec get_msg_info(atom(), list()) ->
+        {Msg::atom(), MsgType::string(), app|admin, Fields::list()}.
+get_msg_info(MsgType, Messages) -> get_msg_info(MsgType, Messages, undefined).
+get_msg_info(MsgType, Messages, Default) when is_list(Messages) ->
+  case lists:keyfind(MsgType, 2, Messages) of
+    false when Default /= undefined -> Default;
+    false                           -> throw(ignore);
+    R                               -> R
+  end.
+
+align_table(TupList) when is_list(TupList) ->
+  stringx:align_rows(TupList,
+    [{return, list}, {ignore_empty, true}, {pad, [{last, none}]}]).
 
 write_file(Type, SrcOrInc, State, File, Header, Data) ->
   write_file(Type, SrcOrInc, State, File, Header, Data, true).
