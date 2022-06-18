@@ -1544,6 +1544,9 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         return make_error(env, "unsupported_data_type", ptr - begin, code);
     }
 
+    if (*p != soh) [[unlikely]]
+      return make_error(env, "unexpected_parser_state", ptr - begin, code);
+
     assert(*p == soh);
 
     state   = ParserState::CODE;
