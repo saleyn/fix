@@ -1412,6 +1412,42 @@ generate_build_files(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath} = 
                            [{return, binary}]),
       ok      = file:write_file(CMakefile, Data)
   end,
+  if State#state.elixir ->
+    Mix = "./mix.exs",
+    case filelib:is_regular(Mix) of
+      true  -> ok;
+      false ->
+        io:format("Writing file:  ~s\n", [Mix]),
+        ok = file:write_file(Mix, [
+          "defmodule FIX.MixProject do\n"
+          "  use Mix.Project\n"
+          "\n"
+          "  def project do\n"
+          "    [\n"
+          "      app:             :", add_variant_suffix("fix", State), ",\n"
+          "      version:         \"1.0.0\",\n"
+          "      elixir:          \"~> 1.13\",\n"
+          "      start_permanent: Mix.env() == :prod,\n"
+          "      deps:            deps(),\n"
+          "      elixirc_paths:   [\"src\"],\n"
+          "    ]\n"
+          "  end\n"
+          "\n"
+          "  def application do\n"
+          "    [\n"
+          "      extra_applications: [:logger, :fix],\n"
+          "    ]\n"
+          "  end\n"
+          "\n"
+          "  defp deps do\n"
+          "    [\n"
+          "      {:fix, git: \"git@github.com:saleyn/fix.git\", branch: \"master\"},\n"
+          "    ]\n"
+          "  end\n"
+          "end\n"
+        ])
+    end
+  end,
   Rebar = "./rebar.config",
   case filelib:is_regular(Rebar) of
     true  -> ok;
