@@ -25,21 +25,22 @@
 
 #include "util.hpp"
 
-static ERL_NIF_TERM am_utc;
-static ERL_NIF_TERM am_local;
-static ERL_NIF_TERM am_us;
-static ERL_NIF_TERM am_ms;
-static ERL_NIF_TERM am_sec;
-static ERL_NIF_TERM am_ts_type;
-static ERL_NIF_TERM am_binary;
-static ERL_NIF_TERM am_offset;
-static ERL_NIF_TERM am_delim;
 static ERL_NIF_TERM am_badarg;
 static ERL_NIF_TERM am_badenv;
 static ERL_NIF_TERM am_badvariant;
-static ERL_NIF_TERM am_full;
-static ERL_NIF_TERM am_so_files;
+static ERL_NIF_TERM am_binary;
 static ERL_NIF_TERM am_debug;
+static ERL_NIF_TERM am_delim;
+static ERL_NIF_TERM am_float;
+static ERL_NIF_TERM am_full;
+static ERL_NIF_TERM am_local;
+static ERL_NIF_TERM am_ms;
+static ERL_NIF_TERM am_offset;
+static ERL_NIF_TERM am_sec;
+static ERL_NIF_TERM am_so_files;
+static ERL_NIF_TERM am_ts_type;
+static ERL_NIF_TERM am_us;
+static ERL_NIF_TERM am_utc;
 
 //------------------------------------------------------------------------------
 // NIFs
@@ -58,11 +59,13 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   if (!pers) [[unlikely]]
     return enif_raise_exception(env, am_badenv);
 
-  ErlNifBinary input;
-  bool ret_binary = false;
-  bool full       = false; // Include 'BeginString', 'BodyLength', 'CheckSum'?
+  ErlNifBinary        input;
+  bool  ret_binary  = false;
+  bool  full        = false; // Include 'BeginString', 'BodyLength', 'CheckSum'?
+  const ERL_NIF_TERM* pair;
+  FixVariant*         var;
 
-  FixVariant* var;
+  DoubleFmt           dbl_fmt = DoubleFmt::Double;
 
   if (argc < 2 || !enif_inspect_binary(env, argv[1], &input)) [[unlikely]]
     return enif_make_badarg(env);
@@ -75,10 +78,22 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
       ERL_NIF_TERM  head, list = argv[2];
       while (enif_get_list_cell(env, list, &head, &list)) {
+        int arity;
         if (enif_is_identical(head, am_binary))
           ret_binary = true;
         else if (enif_is_identical(head, am_full))
           full = true;
+        else if (enif_get_tuple(env, head, &arity, &pair) && arity == 2 &&
+                 enif_is_identical(pair[0], am_float))  {
+          if      (enif_is_identical(pair[1], am_binary))
+            dbl_fmt = DoubleFmt::Binary;
+          else if (enif_is_identical(pair[1], am_decimal))
+            dbl_fmt = DoubleFmt::Decimal;
+          else if (enif_is_identical(pair[1], am_float))
+            dbl_fmt = DoubleFmt::Double;
+          else [[unlikely]]
+            return enif_make_badarg(env);
+        }
         else [[unlikely]]
           return enif_make_badarg(env);
       }
@@ -90,7 +105,7 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   const auto* begin = input.data;
   const auto* end   = input.data + input.size;
 
-  return do_split(var, env, begin, end, ret_binary, full);
+  return do_split(var, env, begin, end, ret_binary, full, dbl_fmt);
 }
 
 // "is_name" is 0, if val is integer or binary encoded integer
@@ -759,15 +774,20 @@ static int init_env(void** priv_data, std::vector<std::string> const& so_files,
                     int debug, TsType ts_type)
 {
   // Init persistent environment that owns some binaries shared across NIF calls
-  try   {*priv_data = (void*)(new Persistent(so_files, debug, ts_type));}
-  catch (std::exception const& e)
-  {
+  try   {
+    auto     p = new Persistent(so_files, debug, ts_type);
+    *priv_data = (void*)(p);
+  }
+  catch (std::exception const& e) {
     std::ostringstream str;
     std::copy(so_files.begin(), so_files.end(),
       std::ostream_iterator<std::string>(str, "\r\n"));
-    fprintf(stderr, "Cannot initialize FIX NIF environment: %s\r\nLibs:\r\n%s\r\n",
-            e.what(), str.str().c_str());
+    PRINT("FIX: Libs:\r\n%s", str.str().c_str());
+    PRINT("FIX ERROR: Cannot initialize FIX NIF library: %s", e.what());
     return 1;
+  } catch (...) {
+    PRINT("FIX ERROR: unknown exception: %s", "\r\n");
+    return 2;
   }
   return 0;
 }
@@ -800,21 +820,22 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
   }
 
   try {
-    am_utc        = safe_make_atom(env, "utc");
-    am_local      = safe_make_atom(env, "local");
-    am_us         = safe_make_atom(env, "us");
-    am_ms         = safe_make_atom(env, "ms");
-    am_sec        = safe_make_atom(env, "sec");
-    am_ts_type    = safe_make_atom(env, "ts_type");
-    am_binary     = safe_make_atom(env, "binary");
-    am_offset     = safe_make_atom(env, "offset");
-    am_delim      = safe_make_atom(env, "delim");
     am_badarg     = safe_make_atom(env, "badarg");
     am_badenv     = safe_make_atom(env, "badenv");
     am_badvariant = safe_make_atom(env, "badvariant");
-    am_full       = safe_make_atom(env, "full");
-    am_so_files   = safe_make_atom(env, "so_files");
+    am_binary     = safe_make_atom(env, "binary");
     am_debug      = safe_make_atom(env, "debug");
+    am_delim      = safe_make_atom(env, "delim");
+    am_float      = safe_make_atom(env, "float");
+    am_full       = safe_make_atom(env, "full");
+    am_local      = safe_make_atom(env, "local");
+    am_ms         = safe_make_atom(env, "ms");
+    am_offset     = safe_make_atom(env, "offset");
+    am_sec        = safe_make_atom(env, "sec");
+    am_so_files   = safe_make_atom(env, "so_files");
+    am_ts_type    = safe_make_atom(env, "ts_type");
+    am_us         = safe_make_atom(env, "us");
+    am_utc        = safe_make_atom(env, "utc");
   }
   catch (std::exception const& e) {
     errs = e.what();

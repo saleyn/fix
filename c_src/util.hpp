@@ -19,24 +19,36 @@
 #define IS_LIKELY(Expr)   __builtin_expect(!!(Expr), 1)
 #define IS_UNLIKELY(Expr) __builtin_expect(!!(Expr), 0)
 
+#define PRINT(Fmt, ...)                                 \
+  fprintf(stderr, Fmt " [%s:%d]\r\n", __VA_ARGS__,      \
+          basename(__FILE__), __LINE__)
+
 #define DBGPRINT(Debug, Level, Fmt, ...)                \
   do {                                                  \
     if (Debug >= Level)                                 \
-      fprintf(stderr, Fmt " [%s:%d]\r\n", __VA_ARGS__,  \
-              basename(__FILE__), __LINE__);            \
+      PRINT(Fmt, __VA_ARGS__);                          \
   } while(0)
 
 //------------------------------------------------------------------------------
 // Static variables
 //------------------------------------------------------------------------------
-static ERL_NIF_TERM am_nil;
-static ERL_NIF_TERM am_true;
-static ERL_NIF_TERM am_false;
-static ERL_NIF_TERM am_ok;
-static ERL_NIF_TERM am_error;
-static ERL_NIF_TERM am_more;
+static ERL_NIF_TERM am_decimal;
 static ERL_NIF_TERM am_enomem;
+static ERL_NIF_TERM am_exception;
+static ERL_NIF_TERM am_error;
+static ERL_NIF_TERM am_false;
+static ERL_NIF_TERM am_fix;
+static ERL_NIF_TERM am_fix_error;
 static ERL_NIF_TERM am_group;
+static ERL_NIF_TERM am_message;
+static ERL_NIF_TERM am_more;
+static ERL_NIF_TERM am_pos;
+static ERL_NIF_TERM am_reason;
+static ERL_NIF_TERM am_struct;
+static ERL_NIF_TERM am_tag;
+static ERL_NIF_TERM am_nil;
+static ERL_NIF_TERM am_ok;
+static ERL_NIF_TERM am_true;
 
 static const char SOH = 1;
 
@@ -139,6 +151,12 @@ static const char* type_to_string(FieldType val) {
 
   return val <= UTCTIMESTAMP ? s_vals[val] : s_vals[0];
 }
+
+enum class DoubleFmt {
+  Double,
+  Decimal,
+  Binary
+};
 
 enum class TsType {
   Seconds  = 0,
@@ -325,14 +343,15 @@ struct FixVariant {
 
   ~FixVariant();
 
-  int                 debug()   const { return m_pers->debug(); }
-  Persistent  const*  pers()    const { return m_pers;          }
+  int                 debug()     const { return m_pers->debug(); }
+  Persistent  const*  pers()      const { return m_pers;          }
 
-  std::string const&  variant() const { return m_variant;       }
-  std::string const&  so_path() const { return m_so_path;       }
-  ErlNifEnv*          env()           { return m_pers->env();   }
-  ErlNifEnv const*    env()     const { return m_pers->env();   }
-  ERL_NIF_TERM        null()          { return ERL_NIF_TERM(0); }
+  std::string const&  variant()   const { return m_variant;       }
+  bool                is_elixir() const { return m_elixir;        }
+  std::string const&  so_path()   const { return m_so_path;       }
+  ErlNifEnv*          env()             { return m_pers->env();   }
+  ErlNifEnv const*    env()       const { return m_pers->env();   }
+  ERL_NIF_TERM        null()            { return ERL_NIF_TERM(0); }
 
   Field const*        field(unsigned idx) const;
   Field*              field(unsigned idx);
@@ -391,6 +410,7 @@ struct FixVariant {
 private:
   Persistent*           m_pers;
   std::string           m_variant;
+  bool                  m_elixir;
   std::string           m_so_path;
   void*                 m_so_handle;
   std::vector<Field>    m_fields;
@@ -405,8 +425,9 @@ private:
 
 extern "C"
 {
-  typedef const char* (*fix_variant_name)();
-  typedef std::vector<Field> (*fields_factory)(FixVariant* pers);
+  typedef const char* (*fix_variant_name_fun)();
+  typedef const char* (*fix_target_compiler_fun)();
+  typedef std::vector<Field> (*fix_create_fields_fun)(FixVariant* pers);
 }
 
 //------------------------------------------------------------------------------
@@ -612,7 +633,7 @@ struct ParserState : public DataType {
 ERL_NIF_TERM
 do_split(FixVariant* fvar, ErlNifEnv* env,
          const unsigned char*& begin, const unsigned char* end,
-         bool ret_binary, bool full);
+         bool ret_binary, bool full, DoubleFmt double_fmt);
 
 //------------------------------------------------------------------------------
 // Implementation
@@ -637,12 +658,48 @@ inline std::string to_string(const char* fmt, Args&&... args) {
 }
 
 inline ERL_NIF_TERM
-make_error(ErlNifEnv* env, const char* error, long pos, int tag)
+make_error(FixVariant* var, ErlNifEnv* env, const char* error, long pos, int tag)
 {
-  return enif_make_tuple2(env, am_error,
-          enif_make_tuple3(env, enif_make_atom(env, error),
-                                enif_make_long(env, pos),
-                                enif_make_int(env, tag)));
+  if (var->is_elixir()) {
+    /*
+    %{'__exception__' => true, '__struct__' => 'Elixir.FixError',
+      message => <<"FIX parser error">>, tag => tag, pos => pos, reason => error}
+    */
+    char buf[128];
+    auto len =
+      snprintf(buf, sizeof(buf),
+                "FIX parser error (tag=%d, pos=%ld): %s", tag, pos, error);
+
+    ERL_NIF_TERM keys[] = {
+      am_exception,
+      am_struct,
+      am_message,
+      am_tag,
+      am_pos,
+      am_reason
+    };
+
+    ERL_NIF_TERM values[] = {
+      am_true,
+      am_fix_error,
+      create_binary(env, std::string_view(buf, len)),
+      enif_make_long(env, tag),
+      enif_make_long(env, pos),
+      enif_make_atom(env, error)
+    };
+
+    ERL_NIF_TERM map;
+static_assert(std::extent<decltype(keys)>::value == 6);
+    if (enif_make_map_from_arrays(env, keys, values,
+                                  std::extent<decltype(keys)>::value, &map))
+      return enif_raise_exception(env, map);
+  }
+
+  return enif_raise_exception(env,
+          enif_make_tuple4(env, am_fix,
+          enif_make_atom(env, error),
+          enif_make_long(env, pos),
+          enif_make_int(env,  tag)));
 }
 
 inline ERL_NIF_TERM safe_make_atom(ErlNifEnv* env, const char* am)
@@ -1030,14 +1087,24 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
     m_variants_map.emplace(std::make_pair(am, m_variants.back().get()));
   }
 
-  am_nil       = make_atom("nil");
-  am_true      = make_atom("true");
-  am_false     = make_atom("false");
-  am_ok        = make_atom("ok");
-  am_error     = make_atom("error");
-  am_more      = make_atom("more");
+  am_decimal   = make_atom("decimal");
   am_enomem    = make_atom("enomem");
+  am_exception = make_atom("__exception__");
+  am_error     = make_atom("error");
+  am_false     = make_atom("false");
+  am_fix       = make_atom("fix");
+  am_fix_error = make_atom("Elixir.FIX.ParserError");
   am_group     = make_atom("group");
+  am_message   = make_atom("message");
+  am_more      = make_atom("more");
+  am_pos       = make_atom("pos");
+  am_reason    = make_atom("reason");
+  am_struct    = make_atom("__struct__");
+  am_tag       = make_atom("tag");
+  am_nil       = make_atom("nil");
+  am_ok        = make_atom("ok");
+  am_true      = make_atom("true");
+
 }
 
 inline Persistent::~Persistent()
@@ -1103,19 +1170,26 @@ inline FixVariant
   };
 
   auto get_variant_name = [&find_fun](const char* fun) {
-    auto   f = reinterpret_cast<fix_variant_name>(find_fun(fun));
+    auto   f = reinterpret_cast<fix_variant_name_fun>(find_fun(fun));
     assert(f);
     return std::string(f());
   };
 
+  auto is_elixir = [&find_fun](const char* fun) {
+    auto   f = reinterpret_cast<fix_target_compiler_fun>(find_fun(fun));
+    assert(f);
+    return std::string(f()) == "elixir";
+  };
+
   auto get_fields = [this, &find_fun](const char* fun) {
-    auto    factory = reinterpret_cast<fields_factory>(find_fun(fun));
+    auto    factory = reinterpret_cast<fix_create_fields_fun>(find_fun(fun));
     assert (factory);
     return (factory)(this);
   };
 
-  m_variant = get_variant_name("get_fix_variant_name");
-  m_fields  = get_fields("create_fix_fields");
+  m_variant = get_variant_name("fix_variant_name");
+  m_elixir  = is_elixir("fix_target_compiler");
+  m_fields  = get_fields("fix_create_fields");
 
   if (m_variant.size() == 0)
     throw std::runtime_error("Empty FIX variant in file: " + so_file);
@@ -1123,8 +1197,8 @@ inline FixVariant
     throw std::runtime_error
       ("FIX variant '" + m_variant + "' empty fields: " + so_file);
 
-  DBGPRINT(m_pers->debug(), 1, "FIX(%s): initializing %lu fields",
-      m_variant.c_str(), m_fields.size());
+  DBGPRINT(m_pers->debug(), 1, "FIX(%s): initializing %lu fields from file: %s",
+      m_variant.c_str(), m_fields.size(), so_file.c_str());
 
   m_bins.resize(0);
   m_bins.reserve(m_fields.size()+1);
@@ -1148,7 +1222,7 @@ inline FixVariant
       (std::make_pair(m_fields[i].name_str(), i));
     m_atom_to_tag_map.emplace
       (std::make_pair(enif_make_atom(env(), m_fields[i].name()), i));
-    if (strncmp(m_fields[i].name(), "Elixir.", 7) == 0) {
+    if (m_elixir && strncmp(m_fields[i].name(), "Elixir.", 7) == 0) {
       m_name_to_tag_map.emplace
         (std::make_pair(m_fields[i].name()+7, i));
       m_atom_to_tag_map.emplace
@@ -1268,15 +1342,15 @@ FixVariant::field_with_tag(ErlNifEnv* env, ERL_NIF_TERM tag)
 inline ERL_NIF_TERM
 do_split(FixVariant* fvar, ErlNifEnv* env,
          const unsigned char*&  begin,  const unsigned char* end,
-         bool  ret_binary, bool full)
+         bool  ret_binary, bool full, DoubleFmt double_fmt)
 {
-  auto len = int(end - begin);
+  const auto len = int(end - begin);
 
   if (len < 25)
     return enif_make_tuple2(env, am_more, enif_make_int(env, 25 - len));
 
   if (memcmp("8=FIX", begin, 5) != 0) [[unlikely]]
-    return make_error(env, "missing_tag", 0, 8);
+    return make_error(fvar, env, "missing_tag", 0, 8);
 
   char soh = 0;
 
@@ -1289,14 +1363,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   // Did we find the SOH?
   if (soh == 0) [[unlikely]]
-    return make_error(env, "missing_soh", 0, 8);
+    return make_error(fvar, env, "missing_soh", 0, 8);
 
   // Find FIX length (tag9) in prefix: "8=FIX.M.N|9=LLLL|"...
   const char s_prefix[] = {soh, '9', '='};
   auto f9 = (const unsigned char*)memmem(begin+5, len, s_prefix, sizeof(s_prefix));
 
   if (!f9) [[unlikely]]
-    return make_error(env, "missing_tag", 0, 9);
+    return make_error(fvar, env, "missing_tag", 0, 9);
 
   f9 += 3; // Adjust for <<1,"9=">>
 
@@ -1304,7 +1378,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   auto body = str_to_int(f9, end, msg_len, soh);
   if (body == nullptr)
-    return make_error(env, "invalid_tag", 0, 9);
+    return make_error(fvar, env, "invalid_tag", 0, 9);
 
   auto end_len = msg_len + 1+7; //  SOH + "10=XXX" + SOH
   auto msg_end = body + end_len;
@@ -1316,12 +1390,12 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   static const char s_checksum[] = {'1', '0', '='};
   if (memcmp(pcsum, s_checksum, sizeof(s_checksum)) != 0) [[unlikely]]
-    return make_error(env, "invalid_msg_length", msg_len, 9);
+    return make_error(fvar, env, "invalid_msg_length", msg_len, 9);
 
   msg_len = msg_end - begin;  // Complete length of current FIX message
 
   if (*(msg_end-1) != soh) [[unlikely]]
-    return make_error(env, "invalid_msg_terminator", msg_len, 0);
+    return make_error(fvar, env, "invalid_msg_terminator", msg_len, 0);
 
   auto  state = ParserState(ParserState::CODE);
   int   code  = 0;
@@ -1362,7 +1436,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         code = 0;
         p    = str_to_int(ptr, end, code, '=');
         if (!p)
-          return make_error(env, "code", ptr - begin, code);
+          return make_error(fvar, env, "code", ptr - begin, code);
 
         field = (code > 0 && code < fvar->field_count())
               ? fvar->field(code) : fvar->field(0);
@@ -1374,7 +1448,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           int size        = reply_capacity*sizeof(ERL_NIF_TERM);
           reply.reset((ERL_NIF_TERM*)realloc(reply.release(), size));
           if (!reply)
-            return make_error(env, "code_out_of_memory", ptr - begin, code);
+            return make_error(fvar, env, "code_out_of_memory", ptr - begin, code);
         }
 
         tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
@@ -1398,7 +1472,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         long ival=0;
         p = str_to_int(ptr, end, ival, soh);
         if (p == nullptr)
-          return make_error(env, "int", ptr - begin, code);
+          return make_error(fvar, env, "int", ptr - begin, code);
 
         assert(field);
 
@@ -1413,25 +1487,46 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
       }
 
       case ParserState::DOUBLE: {
-        long ival=0;
-        p = str_to_int(ptr, end, ival, soh, '.');
-        if (p == nullptr)
-          return make_error(env, "double", ptr - begin, code);
+        long n=0, i=0;
 
-        double dval = ival;
+        for(; p < end && *p >= '0' && *p <= '9'; ++p, ++i)
+          n = n*10 + (*p - '0');
 
-        if (*(p+1) == '.') {
-          auto coeff = 1.0;
-          for(++p /* Skip '.' */; p < end && *p >= '0' && *p <= '9'; ++p) {
+        if (p == end || (*p != '.' && *p != soh)) [[unlikely]]
+          return make_error(fvar, env, "double_soh", ptr - begin, code);
+
+        long   tmp  = i;
+        double mant = n, frac = 0, coeff = 1.0;
+        if (*p == '.') {
+          // ++p skips '.'
+          for(++p; p<end && *p >= '0' && *p <= '9'; ++i,++p) {
+            n      = n*10 + (*p - '0');
             coeff *= 0.1;
-            dval  += (*p - '0')*coeff;
+            frac  += (*p - '0')*coeff;
           }
-          if (p == end || *p != soh) // Skip SOH
-            return make_error(env, "double_soh", ptr - begin, code);
-          dval += ival < 0 ? -dval : +dval;
         }
 
-        value = enif_make_double(env, dval);
+        if (p == end || *p != soh) [[unlikely]]
+          return make_error(fvar, env, "double_soh", ptr - begin, code);
+
+        if (double_fmt == DoubleFmt::Binary || i > 19) {
+          auto sz   = p - ptr;
+          auto data = enif_make_new_binary(env, sz, &value);
+
+          if (!data) [[unlikely]]
+            return make_error(fvar, env, "binary_alloc", ptr - begin, code);
+          memcpy(data, ptr, sz);
+          break;
+        }
+        else if (double_fmt == DoubleFmt::Double) {
+          double res = double(mant) + (mant < 0 ? -frac : +frac);
+          value      = enif_make_double(env, res);
+        } else {
+          assert(double_fmt == DoubleFmt::Decimal);
+          value = enif_make_tuple3(env, am_decimal,
+                    enif_make_long(env, n), enif_make_long(env, i - tmp));
+        }
+
         break;
       }
 
@@ -1439,7 +1534,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         int ival=0;
         p = str_to_int(ptr, end, ival, soh); // Get the number of repeating groups
         if (p == nullptr)
-          return make_error(env, "group", ptr - begin, code);
+          return make_error(fvar, env, "group", ptr - begin, code);
 
         value = enif_make_long(env, ival);
         break;
@@ -1456,14 +1551,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         }
 
         if (p >= end || *p != soh)
-          return make_error(env, "binary", ptr - begin, code);
+          return make_error(fvar, env, "binary", ptr - begin, code);
 
         const auto len = p - ptr;
 
         if (ret_binary) {
           auto data = enif_make_new_binary(env, len, &value);
           if (!data)
-            return make_error(env, "binary_alloc", ptr - begin, code);
+            return make_error(fvar, env, "binary_alloc", ptr - begin, code);
           memcpy(data, ptr, len);
         } else {
           value = enif_make_tuple2(env,
@@ -1482,8 +1577,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           next_data_length = -1;
         }
 
-        if (p >= end || *p != soh)
-          return make_error(env, "string", ptr - begin, code);
+        if (*p != soh || p >= end)
+          return make_error(fvar, env, "string", ptr - begin, code);
 
         assert(field);
 
@@ -1494,7 +1589,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           if (ret_binary) {
             auto data = enif_make_new_binary(env, len, &value);
             if (!data)
-              return make_error(env, "string_alloc_binary", ptr-begin, code);
+              return make_error(fvar, env, "string_alloc_binary", ptr-begin, code);
             memcpy(data, ptr, len);
           } else
             value = enif_make_tuple2(env,
@@ -1509,13 +1604,13 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         while (p < end && *p != soh) ++p;
 
         if (*p != soh)
-          return make_error(env, "datetime", ptr - begin, code);
+          return make_error(fvar, env, "datetime", ptr - begin, code);
 
         auto len = p - ptr;
         auto ts  = decode_timestamp(env, reinterpret_cast<const char*>(ptr), len);
 
         if (ts < 0) [[unlikely]]
-          return make_error(env, "datetime", ptr - begin, code);
+          return make_error(fvar, env, "datetime", ptr - begin, code);
 
         value = enif_make_int64(env, ts);
         break;
@@ -1524,14 +1619,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
       case ParserState::BOOL: {
         value = (*ptr == 'Y' || *ptr == 'y') ? am_true : am_false;
         if (++p == end || *p != soh)
-          return make_error(env, "boolean_soh", ptr - begin, code);
+          return make_error(fvar, env, "boolean_soh", ptr - begin, code);
 
         break;
       }
 
       case ParserState::CHAR: {
         if (++p == end || *p != soh)
-          return make_error(env, "char_soh", ptr - begin, code);
+          return make_error(fvar, env, "char_soh", ptr - begin, code);
 
         value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
                                     : enif_make_int(env, (int)*ptr);
@@ -1541,13 +1636,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         break;
       }
       default:
-        return make_error(env, "unsupported_data_type", ptr - begin, code);
+        return make_error(fvar, env, "unsupported_data_type", ptr - begin, code);
     }
 
-    if (*p != soh) [[unlikely]]
-      return make_error(env, "unexpected_parser_state", ptr - begin, code);
+    if (p >= end) [[unlikely]]
+      return make_error(fvar, env, "read_beyond_buffer_len", ptr - begin, code);
 
-    assert(*p == soh);
+    if (*p != soh) [[unlikely]]
+      return make_error(fvar, env, "missing_soh", ptr - begin, code);
 
     state   = ParserState::CODE;
     tag_end = p++;  // Skip SOH

@@ -38,6 +38,7 @@
   elixir   = false,
   cpp_path = "c_src",
   erl_path = "src",
+  elixir_path = "src",
   inc_path = "include",
   app_descr= "",
   version,
@@ -46,7 +47,7 @@
   variant  = "",      %% FIX Variant Name (required argument)
   var_pfx  = "",      %% FIX variant prefix in lower case
   var_sfx  = "",      %% FIX variant suffix in lower case
-  gen      = []  :: [erlang | cpp],
+  gen      = []  :: [erlang | elixir | cpp | build],
   src_dir  = filename:dirname(filename:absname(escript:script_name())),
   cur_dir  = filename:absname(""),  %% Current directory
   base_dir = false,   %% Is this generator invoked in the 'fix' project's dir?
@@ -55,7 +56,7 @@
 }).
 
 %%%-----------------------------------------------------------------------------
-%%% External API
+%%% Main
 %%%-----------------------------------------------------------------------------
 
 main(["-h" ++ _]) ->
@@ -65,6 +66,12 @@ main(["--help" ++ _]) ->
 main(Args) ->
   State0 = parse(Args, #state{}),
   Schema = State0#state.schema,
+
+  lists:member(build, State0#state.gen) andalso
+    begin
+      generate_build_files(State0),
+      halt(0)
+    end,
 
   filelib:is_regular(Schema) orelse abort("Schema file " ++ Schema ++ " not found!"),
 
@@ -79,12 +86,118 @@ main(Args) ->
               _         -> State1
             end,
 
-    generate_fields  (Fields,  FldMap,   State),
-    generate_parser  (Header,  Messages, AllMsgGrps, FldMap, State),
-    generate_messages(Header,  Messages, AllMsgGrps, FldMap, State)
+    generate_fields         (Fields,  FldMap,   State),
+    generate_meta_and_parser(Header,  Messages, AllMsgGrps, FldMap, State),
+    generate_messages       (Header,  Messages, AllMsgGrps, FldMap, State)
   end, State0#state.variants),
 
-  copy_makefile(State0).
+  generate_build_files(State0).
+
+usage() ->
+  io:format(standard_error,
+    "Generate code from FIX XML specification file\n"
+    "Usage: ~s [-f File] [-o OutputDir] [-c ConfigFile.config]\n"
+    "     -f InputFile.xml\n"
+    "     -o OutputDir        - Output relative directory under RootDir (-r)\n"
+    "     -c Config           - Configuration file controlling behavior of the code generator (def: fix.config)\n"
+    "     -cr Copyright       - Add copyright text to generated files\n"
+    "     -ad AppDescr        - Application description added to the app.src file\n"
+    "     -e                  - Use Elixir atom prefixing\n"
+    "     -gb                 - Generate build files only (Makefile, rebar.config)\n"
+    "     -ge                 - Generate Erlang code only\n"
+    "     -gc                 - Generate C++ code only\n"
+    "     -sfx  FileSfx       - Suffix to add to generated filenames (default: Variant)\n"
+    "     -var  Variant       - FIX Variant name (this is a required argument)\n"
+    "     -cdir Path          - Output directory for C++ files    (default: ./c_src)\n"
+    "     -edir Path          - Output directory for Erlang files (default: ./src)\n"
+    "     -vsn  FixVSN        - Fix version tag (#8), default: \"FIX.4.4\"\n"
+    "     -q                  - Quiet (don't print WARNING's)\n"
+    "     -d [Level]          - Set debug level (no files get saved)\n"
+    "     -h | --help         - This help screen\n"
+    "\n"
+    "Config file (fix.config):\n"
+    "=========================\n"
+    "{include_app_messages, ['NewOrderSingle', ...]}.\n"
+    "\n"
+    "Example:\n"
+    "========\n"
+    "$ code-gen.es -gb -var kraken\n"
+    , [filename:basename(escript:script_name())]),
+  halt(1).
+
+parse(["-f", Xml | T], S) -> parse(T, S#state{file     = Xml});
+parse(["-o", Out | T], S) -> parse(T, S#state{outdir   = Out});
+parse(["-c", Cfg | T], S) -> parse(T, S#state{config   = Cfg});
+parse(["-cr", CR | T], S) -> parse(T, S#state{copyrt   =  CR});
+parse(["-ad", AD | T], S) -> parse(T, S#state{app_descr=  AD});
+parse(["-vsn", V | T], S) -> parse(T, S#state{version  =   V});
+parse(["-vars",V | T], S) -> parse(T, S#state{variants =   V});
+parse(["-sfx", V | T], S) -> parse(T, S#state{file_sfx =   V});
+parse(["-var", V | T], S) -> V1 = string:to_lower(V),
+                             parse(T, S#state{variant  = V1,
+                                              var_pfx  = V1++"_",
+                                              var_sfx  = "_"++V1
+                                             });
+parse(["-cdir",D | T], S) -> parse(T, S#state{cpp_path =   D});
+parse(["-edir",D | T], S) -> parse(T, S#state{erl_path =   D});
+parse(["-idir",D | T], S) -> parse(T, S#state{inc_path =   D});
+parse(["-d", Lvl | T], S) -> try
+                                I = list_to_integer(Lvl),
+                                parse(T, S#state{debug=I})
+                             catch _:_ ->
+                                parse([Lvl|T], S#state{debug=1})
+                             end;
+parse(["-e"      | T], S) -> parse(T, S#state{elixir   = true});
+parse(["-ge"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [erlang,elixir])});
+parse(["-gc"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [cpp])});
+parse(["-gb"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [build])});
+parse(["-p", V   | T], S) -> true = code:add_patha(V), parse(T, S);
+parse(["-q"      | T], S) -> parse(T, S#state{quiet    = true});
+parse(["-d"      | T], S) -> parse(T, S#state{debug    = 1});
+parse(["-h"      | _],_S) -> usage();
+parse(["--help"  | _],_S) -> usage();
+parse([Other     | _],_S) -> throw({invalid_option, Other});
+parse([],              S) ->
+  %% Apply defaults here:
+  Vars0 = [I || I <- string:split(os:getenv("FIX_VARIANTS", ""), ";", all), I /= []],
+  length(Vars0) > 0 andalso S#state.file /= undefined
+    andalso abort("Cannot provide -f option when FIX_VARIANTS environment is set!"),
+
+  Vars      = nvl(S#state.variants, Vars0),
+  ScriptDir = S#state.src_dir,
+  CurDir    = S#state.cur_dir,
+
+  Schema    = filename:join(ScriptDir, S#state.schema),
+
+  S0 = S#state{base_dir = (ScriptDir == CurDir), schema = Schema},
+
+  %% If not in the source repository don't allow empty variants
+  S0#state.variant == ""
+    andalso not S0#state.base_dir
+    andalso abort("Must specify -var argument for the FIX variant!"),
+
+  S0#state.variant == "default"
+    andalso not S0#state.base_dir
+    andalso abort("Invalid FIX variant name '~s'", [S0#state.variant]),
+
+  V0 = [S0#state.variant]
+     / string:lowercase
+     / string:replace(" ", "")
+     / lists:flatten,
+
+  V  = nvl(V0, "default"),
+
+  S1 = S0#state{gen = nvl(S#state.gen, [erlang,elixir,cpp]), variant = V},
+  if
+    length(Vars) == 0, V0 /= "", S#state.file /= undefined ->
+      os:putenv("FIX_XML_" ++ string:to_upper(V0), S#state.file),
+      S1#state{variants = [V]};
+    length(Vars) == 0, S#state.file /= undefined ->
+      os:putenv("FIX_XML_" ++ string:to_upper(V0), S#state.file),
+      S1#state{variants = [""]};
+    true ->
+      S1#state{variants = Vars}
+  end.
 
 %%------------------------------------------------------------------------------
 %% Code generating functions
@@ -132,128 +245,129 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   MaxLen = lists:foldl(fun({field, AA, _}, I) -> max(I, length(atom_name(get_attr(name, AA),State))) end, 0, Fields),
   Filenm = add_variant_suffix("fix_fields.cpp", State),
   ok     = write_file(cpp, src, State, Filenm, [], [
-            "#include \"util.hpp\"\n\n"
-            "namespace {\n\n"
-            "std::vector<Field> make_all_fields(FixVariant* fvar)\n"
-            "{\n"
-            "  assert(fvar);\n"
-            "  auto vec = std::vector<Field>(", integer_to_list(MaxID+1), ", Field{});\n",
-            lists:map(fun(I) ->
-              % ID::integer(), FieldName::quoted_string(), FieldType::string(),
-              % FieldType::atom(), Vals::list(), LenFldName::quoted_string()
-              {ID, Name, Type, RawType, Vals, LenFldName, LenFldID} =
-                case maps:find(I, FldMap) of
-                  {ok, {N, 'NUMINGROUP' = T, _FldOrGrp, V}} ->
-                    NN         = atom_to_list(N),
-                    {Nm, LenF} = {NN, NN}, %% {group_name(NN), NN},
-                    {I, Nm, atom_to_list(T), T, V, q(LenF), I};
-                  {ok, {N, 'DATA' = T, _FldOrGrp, V}} ->
-                    NN = atom_to_list(N),
-                    {LF,LI} = % The length field name and ID of the data field has this suffix
-                      lists:foldl(fun(Sfx, Ac) ->
-                        LenFld = NN ++ Sfx,
-                        case maps:find(list_to_atom(LenFld), FldMapByName) of
-                          {ok, FldID} -> {LenFld, FldID};
-                          error       -> Ac
-                        end
-                      end,
-                      {"", undefined},
-                      ["Len", "Length"]),
-                    LF == "" andalso
-                      throw("Cannot find length field '" ++ LF ++ "' for field " ++ qname(NN)),
-                    {I, NN, atom_to_list(T), T, V, q(LF), LI};
-                  {ok, {N, T, _FldOrGrp, V}} ->
-                    {I, atom_to_list(N), atom_to_list(T), T, V, "", 0};
-                  error ->
-                    {0, "nullptr", "UNDEFINED", undefined, [], "", 0}
-                end,
+    "#include \"util.hpp\"\n\n"
+    "namespace {\n\n"
+    "std::vector<Field> make_all_fields(FixVariant* fvar)\n"
+    "{\n"
+    "  assert(fvar);\n"
+    "  auto vec = std::vector<Field>(", integer_to_list(MaxID+1), ", Field{});\n",
+    lists:map(fun(I) ->
+      % ID::integer(), FieldName::quoted_string(), FieldType::string(),
+      % FieldType::atom(), Vals::list(), LenFldName::quoted_string()
+      {ID, Name, Type, RawType, Vals, LenFldName, LenFldID} =
+        case maps:find(I, FldMap) of
+          {ok, {N, 'NUMINGROUP' = T, _FldOrGrp, V}} ->
+            NN         = atom_to_list(N),
+            {Nm, LenF} = {NN, NN}, %% {group_name(NN), NN},
+            {I, Nm, atom_to_list(T), T, V, q(LenF), I};
+          {ok, {N, 'DATA' = T, _FldOrGrp, V}} ->
+            NN = atom_to_list(N),
+            {LF,LI} = % The length field name and ID of the data field has this suffix
+              lists:foldl(fun(Sfx, Ac) ->
+                LenFld = NN ++ Sfx,
+                case maps:find(list_to_atom(LenFld), FldMapByName) of
+                  {ok, FldID} -> {LenFld, FldID};
+                  error       -> Ac
+                end
+              end,
+              {"", undefined},
+              ["Len", "Length"]),
+            LF == "" andalso
+              throw("Cannot find length field '" ++ LF ++ "' for field " ++ qname(NN)),
+            {I, NN, atom_to_list(T), T, V, q(LF), LI};
+          {ok, {N, T, _FldOrGrp, V}} ->
+            {I, atom_to_list(N), atom_to_list(T), T, V, "", 0};
+          error ->
+            {0, "nullptr", "UNDEFINED", undefined, [], "", 0}
+        end,
 
-              FirstZero = get(first_zero),
+      FirstZero = get(first_zero),
 
-              if ID==0 ->
-                (FirstZero == undefined) andalso put(first_zero, I),
-                [];
-              true ->
-                erase(first_zero),
-                LID = integer_to_list(ID),
-                LE  = iif(Vals==[], 0, lists:max([length(CC) || {CC,  _} <- Vals])),
-                LEn = length(integer_to_list(LE)),
-                LL  = length(Vals),
-                ME  = LE+2,
-                MD  = iif(Vals==[], 0, lists:max([length(atom_name(caml_case(DD),State)) || {_,DD} <- Vals])+2),
-                NVals = lists:zip(lists:seq(0, LL-1), Vals),
-                [
-                "  vec[", spad(I, WID), "] = Field{      //--- Tag# ", integer_to_list(I), " ", q(Name), "\n",
-                "    fvar,\n"
-                "    ", LID, ",\n"
-                "    ", q(atom_name(Name,State)), ",\n"
-                "    FieldType::", Type, ",\n"
-                "    ", dtype(RawType, MapDT), ",\n"
-                "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
-                lists:map(fun({II,{CC,DD}}) ->
-                  io_lib:format(
-                "      {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
-                                [qpad(CC,ME), qpad(atom_name(caml_case(DD),State), MD), II])
-                end, NVals),
-                iif(Vals==[], "", "    }},\n"),
-                "    ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
-                "    ", integer_to_list(LenFldID), ",\n",
-                if Vals==[] ->
-                  "    nullptr";
-                true ->
-                  "    [](const Field& f, ErlNifEnv* env, const char* code, int len) {"
-                end,
-                if
-                  Vals==[] ->
-                    "\n";
-                  LE == 1 ->
-                    ["\n"
-                     "      if (!len) [[unlikely]] return am_", undef(State), ";\n"
-                     "      switch (code[0]) {\n",
-                     [io_lib:format("        case '~s': return f.value_atom(~s); // ~s\n",
-                                    [CC,spad(integer_to_list(II),LEn),DD])
-                      || {II,{CC,DD}} <- NVals],
-                     "        default: return am_", undef(State), ";\n"
-                     "      }\n"
-                    ];
-                  LE > 8 ->
-                    ["\n"
-                     "      auto   fc = f.value(std::string_view(code, len));\n",
-                     "      return fc ? fc->get_atom(env) : am_", undef(State), ";\n"
-                    ];
-                  true ->
-                    MML = integer_to_list(lists:max([length(to_char_str(CC)) || {CC,_} <- Vals])),
-                    NW  = integer_to_list(length(integer_to_list(length(Vals)))),
-                    ["\n"
-                     "      auto hash = len == 1 ? uint64_t(code[0]) : hash_val(code, len);\n"
-                     "      switch (hash) {\n",
-                     [io_lib:format("        case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
-                        [iif(length(CC)==1, qname(CC), to_char_str(CC)),II,caml_case(DD)])
-                      || {II,{CC,DD}} <- NVals],
-                     "        default: return am_", undef(State), ";\n"
-                     "      }\n"
-                    ]
-                end,
-                iif(Vals==[], "", "    }\n"),
-                "  };\n"
-                ]
-              end
-            end, lists:seq(0, MaxID)),
-            "\n"
-            "  return vec;\n"
-            "}\n\n"
-            "} // namespace\n\n",
-            sep(cpp, 0),
-            "// Main FIX variant creation function exported from the shared object\n",
-            sep(cpp, 0),
-            "extern \"C\" {\n"
-            "  std::vector<Field> create_fix_fields(FixVariant* fvar)\n"
-            "  {\n"
-            "    return make_all_fields(fvar);\n"
-            "  }\n\n"
-            "  const char* get_fix_variant_name() { return \"", get_fix_variant(State), "\"; }\n"
-            "}\n"
-           ]),
+      if ID==0 ->
+        (FirstZero == undefined) andalso put(first_zero, I),
+        [];
+      true ->
+        erase(first_zero),
+        LID = integer_to_list(ID),
+        LE  = iif(Vals==[], 0, lists:max([length(CC) || {CC,  _} <- Vals])),
+        LEn = length(integer_to_list(LE)),
+        LL  = length(Vals),
+        ME  = LE+2,
+        MD  = iif(Vals==[], 0, lists:max([length(atom_name(caml_case(DD),State)) || {_,DD} <- Vals])+2),
+        NVals = lists:zip(lists:seq(0, LL-1), Vals),
+        [
+        "  vec[", spad(I, WID), "] = Field{      //--- Tag# ", integer_to_list(I), " ", q(Name), "\n",
+        "    fvar,\n"
+        "    ", LID, ",\n"
+        "    ", q(atom_name(Name,State)), ",\n"
+        "    FieldType::", Type, ",\n"
+        "    ", dtype(RawType, MapDT), ",\n"
+        "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
+        lists:map(fun({II,{CC,DD}}) ->
+          io_lib:format(
+        "      {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
+                        [qpad(CC,ME), qpad(atom_name(caml_case(DD),State), MD), II])
+        end, NVals),
+        iif(Vals==[], "", "    }},\n"),
+        "    ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
+        "    ", integer_to_list(LenFldID), ",\n",
+        if Vals==[] ->
+          "    nullptr";
+        true ->
+          "    [](const Field& f, ErlNifEnv* env, const char* code, int len) {"
+        end,
+        if
+          Vals==[] ->
+            "\n";
+          LE == 1 ->
+            ["\n"
+              "      if (!len) [[unlikely]] return am_", undef(State), ";\n"
+              "      switch (code[0]) {\n",
+              [io_lib:format("        case '~s': return f.value_atom(~s); // ~s\n",
+                            [CC,spad(integer_to_list(II),LEn),DD])
+              || {II,{CC,DD}} <- NVals],
+              "        default: return am_", undef(State), ";\n"
+              "      }\n"
+            ];
+          LE > 8 ->
+            ["\n"
+              "      auto   fc = f.value(std::string_view(code, len));\n",
+              "      return fc ? fc->get_atom(env) : am_", undef(State), ";\n"
+            ];
+          true ->
+            MML = integer_to_list(lists:max([length(to_char_str(CC)) || {CC,_} <- Vals])),
+            NW  = integer_to_list(length(integer_to_list(length(Vals)))),
+            ["\n"
+              "      auto hash = len == 1 ? uint64_t(code[0]) : hash_val(code, len);\n"
+              "      switch (hash) {\n",
+              [io_lib:format("        case ~"++MML++"s: return f.value_atom(~"++NW++"w); // ~s\n",
+                [iif(length(CC)==1, qname(CC), to_char_str(CC)),II,caml_case(DD)])
+              || {II,{CC,DD}} <- NVals],
+              "        default: return am_", undef(State), ";\n"
+              "      }\n"
+            ]
+        end,
+        iif(Vals==[], "", "    }\n"),
+        "  };\n"
+        ]
+      end
+    end, lists:seq(0, MaxID)),
+    "\n"
+    "  return vec;\n"
+    "}\n\n"
+    "} // namespace\n\n",
+    sep(cpp, 0),
+    "// Main FIX variant creation function exported from the shared object\n",
+    sep(cpp, 0),
+    "extern \"C\" {\n"
+    "  std::vector<Field> fix_create_fields(FixVariant* fvar)\n"
+    "  {\n"
+    "    return make_all_fields(fvar);\n"
+    "  }\n\n"
+    "  const char* fix_variant_name()    { return \"", get_fix_variant(State), "\"; }\n"
+    "  const char* fix_target_compiler() { return \"", iif(State#state.elixir, "elixir", "erlang"), "\"; }\n"
+    "}\n"
+  ]),
   %% Generate fix_fields.erl
   MID = length(integer_to_list(lists:max([ID || {ID, _} <- FldList]))),
   Dsc = iif(State#state.variant=="", "", " " ++ State#state.variant),
@@ -491,37 +605,9 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "encode_msg_nif(Packet) when is_binary(Packet) ->\n"
     "  Packet.\n"
   ]),
-  %%if Variant == "" ->
-  %%  ok;
-  %%true ->
-  %%  %% Generate fix_variant_.erl"
-  %%  FN3 = "fix_variant" ++ State#state.var_sfx,
-  %%  ok  = write_file(erlang, src, State, FN3++".erl", [], [
-  %%    "%% @doc FIX encoder/decoder wrappers of the '", Variant, "' FIX variant\n"
-  %%    "\n"
-  %%    "-module(", FN3, ").\n"
-  %%    "\n"
-  %%    "-export([split/1, split/2, tag_to_field/1, field_to_tag/1]).\n"
-  %%    "-export([decode_field_value/2, encode_field_value/2, list_field_values/1]).\n"
-  %%    "\n"
-  %%    "split(Bin)                       -> fix_nif:split(", Variant, ", Bin).\n"
-  %%    "\n"
-  %%    "split(Bin, Opts)                 -> fix_nif:split(", Variant, ", Bin, Opts).\n"
-  %%    "\n"
-  %%    "tag_to_field(Field)              -> fix_nif:tag_to_field(", Variant, ", Field).\n"
-  %%    "\n"
-  %%    "field_to_tag(Field)              -> fix_nif:field_to_tag(", Variant, ", Field).\n"
-  %%    "\n"
-  %%    "encode_field_value(Field, Value) -> fix_nif:encode_field_value(", Variant, ", Field, Value).\n"
-  %%    "\n"
-  %%    "decode_field_value(Field, Value) -> fix_nif:decode_field_value(", Variant, ", Field, Value).\n"
-  %%    "\n"
-  %%    "list_field_values(Field)         -> fix_nif:list_field_values(", Variant, ", Field).\n"
-  %%  ])
-  %%end,
   FldMap.
 
-generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = State) ->
+generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = State) ->
   {'MsgType', _, _, MsgTypes} = maps:get(35, FldMap),
   FMNm = add_variant_suffix("fix_meta", State),
   ok   = write_file(erlang, src, State, FMNm ++ ".erl", [],
@@ -535,44 +621,40 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     end,
 
     lists:map(fun({Enum, Descr}) ->
-      try
-        {Msg, Type, Cat, Fields} = get_msg_info(Enum, Messages),
+      {Msg, Type, Cat, Fields} = get_msg_info(Enum, Messages),
 
-        DepChk = fun
-          DC({field, A, _}, {I, Max}) ->
-            Name   = get_attr(name, A),
-            Max1   = max(Max, length(atom_to_list(Name))+2+2*I),
-            {I, Max1};
-          DC({group, A, V}, {I, Max}) ->
-            Name   = get_attr(name, A),
-            Max1   = max(Max, length(atom_to_list(Name))+2+2*I),
-            {_, N} = lists:foldl(DC, {I+1, Max1}, V),
-            {I, lists:max([Max1, N])}
-        end,
+      DepChk = fun
+        DC({field, A, _}, {I, Max}) ->
+          Name   = get_attr(name, A),
+          Max1   = max(Max, length(atom_to_list(Name))+2+2*I),
+          {I, Max1};
+        DC({group, A, V}, {I, Max}) ->
+          Name   = get_attr(name, A),
+          Max1   = max(Max, length(atom_to_list(Name))+2+2*I),
+          {_, N} = lists:foldl(DC, {I+1, Max1}, V),
+          {I, lists:max([Max1, N])}
+      end,
 
-        {_, MWi} = lists:foldl(DepChk, {0,0}, Fields),
+      {_, MWi} = lists:foldl(DepChk, {0,0}, Fields),
 
-        Fun = fun
-          G(Indent, Flds) ->
-            Pfx = string:copies(" ", 6 + 2*Indent),
-            MW  = integer_to_list(MWi - 2*Indent),
-            string:join(
-              [io_lib:format("~s~-"++MW++"s => #meta{type=~w, required=~-5w, order=~w~s}",
-                [Pfx, sq(atom_to_list(get_attr(name, A))), Tag,
-                  get_attr(required, A) == required, Order,
-                  iif(Tag==group, io_lib:format(", content=#{\n~s\n~s}",
-                      [G(Indent+1, Vals), Pfx]), "")
-                ])
-                || {Order, {Tag, A, Vals}} <- lists:zip(lists:seq(1, length(Flds)), Flds)],
-              ",\n")
-        end,
+      Fun = fun
+        G(Indent, Flds) ->
+          Pfx = string:copies(" ", 6 + 2*Indent),
+          MW  = integer_to_list(MWi - 2*Indent),
+          string:join(
+            [io_lib:format("~s~-"++MW++"s => #meta{type=~w, required=~-5w, order=~w~s}",
+              [Pfx, sq(atom_to_list(get_attr(name, A))), Tag,
+                get_attr(required, A) == required, Order,
+                iif(Tag==group, io_lib:format(", content=#{\n~s\n~s}",
+                    [G(Indent+1, Vals), Pfx]), "")
+              ])
+              || {Order, {Tag, A, Vals}} <- lists:zip(lists:seq(1, length(Flds)), Flds)],
+            ",\n")
+      end,
 
-        io_lib:format("\n~smsg_meta(~w) ->\n  #{\n    type   => \"~s\",\n    kind   => ~w,\n    fields => #{\n~s\n    }\n  };\n",
-          [iif(Descr=="", "", ["%% ", Descr, "\n"]), Msg, Type, Cat, Fun(0, Fields)])
-      catch throw:ignore ->
-        ""
-      end
-    end, [{header, ""} | MsgTypes]),
+      io_lib:format("\n~smsg_meta(~w) ->\n  #{\n    type   => \"~s\",\n    kind   => ~w,\n    fields => #{\n~s\n    }\n  };\n",
+        [iif(Descr=="", "", ["%% ", Descr, "\n"]), Msg, Type, Cat, Fun(0, Fields)])
+    end, MsgTypes),
     "msg_meta(M) -> erlang:raise(\"Unknown message \" ++ atom_to_list(M)).\n\n",
 
     align_table(
@@ -612,6 +694,43 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
       [{"is_app_msg(_)", " -> false.\n"}])
   ]),
 
+  if State#state.elixir ->
+    {_Msg0, _Type0, _Cat0, HFields} = Header,
+    ReqFlds = [get_attr(name, A) || {_FldOrGrp, A, _} <- HFields, get_attr(required, A)],
+
+    FN3 = add_variant_suffix("fix_structs.ex", State),
+    ok  = write_file(elixir, src, State, FN3, [], [
+      "defmodule FIX.Header do\n"
+      "  defstruct [\n",
+      align_table([{"    "++atom_to_list(F)++": ", "nil,\n"} || F <- ReqFlds]),
+      "  ]\n"
+      "end\n\n",
+      "defmodule FIX.ParserError do\n"
+      "  defexception [:tag, :pos, :reason, :message]\n\n"
+      "  def message(e), do: e.message\n"
+      "end\n\n",
+      lists:map(fun({Enum, _Descr}) ->
+        try
+          {Msg, _Type, app, Fields} = get_msg_info(Enum, Messages),
+          [
+            "defmodule FIX.", atom_to_list(Msg), " do\n"
+            "  defstruct [\n",
+            align_table(
+              [{"    "++atom_to_list(get_attr(name, A))++": ", "nil,\n"}
+                || {_Tag, A, _} <- Fields, get_attr(required, A) == true]
+            ),
+            "  ]\n"
+            "end\n\n"
+          ]
+        catch _:_ ->
+          []
+        end
+      end, MsgTypes)
+    ]);
+  true ->
+    ok
+  end,
+
   FNm  = add_variant_suffix("fix_decoder", State),
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
   [
@@ -624,10 +743,11 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
     end,
     "\n"
     "-define(MAP_SET(_R, _F, _V), _R#fix{fields = (R#fix.fields)#{_F => _V}}).\n"
+    "-define(MSG_INIT(_MT), #fix{msgtype=_MT", iif(State#state.elixir, ", fields = #{'__struct__' => _MT}"),"}).\n"
     "\n"
     "field(N) -> ", add_variant_suffix("fix_fields", State), ":field(N).\n\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
-    "  case decode_msg_header(Msg, #fix{}, 0, []) of\n"
+    "  case decode_msg_header(Msg, #fix{", iif(State#state.elixir, ", header = #{'__struct__' => Elixir.FIX.Header}"),"}, 0, []) of\n"
     "    {#fix{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
     "      {#fix{} = M, I1, U} = decode_msg(MT, L),\n"
     "      {I1, M#fix{header=H}, U};\n"
@@ -643,7 +763,7 @@ generate_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=SFX} = Sta
           {Msg, _Type, _Cat, _Fields} ->
             {lists:flatten("decode_msg("++sq(atom_name(Msg,State))), ", L)", " -> ",
               "decode_msg_"++atom_to_list(Msg), "(L, ",
-              "#fix{msgtype="++lists:flatten(sq(atom_name(Msg,State)))++"}", ", 0, []);\n"}
+              "?MSG_INIT("++lists:flatten(sq(atom_name(Msg,State)))++")", ", 0, []);\n"}
         end
       end, MsgTypes) ++
       [{"decode_msg(_,", "_)", " -> ", "false", " ", " ", ".\n"}]
@@ -771,128 +891,53 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
   ok  = write_file(erlang, inc, State, add_variant_suffix("fix_adm_msgs.hrl", State), ["%% Administrative FIX messages\n"], AdminOut),
   ok  = write_file(erlang, inc, State, add_variant_suffix("fix_app_msgs.hrl", State), ["%% Application FIX messages\n"],    AppOut),
   FN4 = add_variant_suffix("fix_groups", State),
-  ok  = write_file(erlang, src, State, FN4++".erl", ["%% Metadata about FIX groups\n"],
-        [
-          "-module(", FN4, ").\n\n",
-          "-include(\"", add_variant_suffix("fix.hrl", State), "\").\n"
-          "\n"
-          "-export([\n",
-          lists:map(fun({M,G,_}) ->
-            ["  decode_", atom_to_list(M), "_", atom_to_list(group_name(G)), "/2,\n"]
-          end, AllGrps),
-          "  decode_group/3\n",
-          "]).\n\n",
-          %% lists:map(fun({G, FF}) ->
-          %%   II = string:pad(integer_to_list(Name2ID(G)), MaxIDLen, leading),
-          %%   [
-          %%     "%% Group: ", atom_to_list(group_name(G)), "\n",
-          %%     [["is_grp_field(", II, ", ", string:pad(integer_to_list(ID), MaxIDLen, leading),
-          %%       ") -> true; %% ", atom_to_list(F), "\n"] || {F, ID, _Req, _IsGrp} <- FF],
-          %%     "is_grp_field(", II, ", _", string:pad("", MaxIDLen*2-4, leading), ") -> false;\n\n"
-          %%   ]
-          %% end, Groups),
-          %% "is_grp_field(_, ", string:pad("_", MaxIDLen*2-2), ") -> false.\n\n",
-          lists:map(fun({Msg, G, _FF}) ->
-            GA = sqpad(G, MaxNLen+2),
-            %%GN = spad(group_name(G),  MaxGrpLen),
-            MN = sqpad(Msg, MaxMsgLen),
-            ["decode_group(", MN, ", ", GA, ", L) -> decode_", atom_to_list(Msg), "_", atom_to_list(group_name(G)), "(L, ", undef(State), ", #group{name=", sq(G), "});\n"]
-          end, AllGrps),
-          "decode_group(_, _, _) -> false.\n\n",
-          lists:map(fun({Msg, G, FF}) ->
-            GN = atom_to_list(group_name(G)),
-            FN = atom_to_list(Msg) ++ "_" ++ GN,
-            ML = lists:max([length(atom_to_list(F)) || {F, _ID, _Req, _IsGrp} <- FF])+2,
-            [
-              "%% Parse Group: ", GN, " in message ", atom_to_list(Msg), "\n",
-              "decode_",  FN, "(L, R) -> decode_", FN, "(L, ", undef(State), ", R).\n",
-              "decode_",  FN, "([{", spad("Delim",ML+2), ",_,_,_}|_]=L, Delim, R) -> {L, R};\n",
-              [[
-                "decode_",  FN, "([{", spad(sq(F)++"=H", ML+2), ",V,_,_}|T], Delim, #group{fields=F} = R) ->"
-                " decode_", FN, "(T, def(Delim,H), R#group{fields = F#{", sqpad(F,ML), " => V}});\n"
-               ] || {F, _ID, _Req, _IsGrp} <- FF],
-              "decode_", FN, "(L, _Delim, R) -> {L, R}.\n\n"
-            ]
-          end, AllGrps),
-          "\n"
-          "def(undefined,N) -> N;\n"
-          "def(", undef(State), ",N) -> N;\n"
-          "def(Other,   _N) -> Other.\n"
-        ]),
-  ok.
-
-parse(["-f", Xml | T], S) -> parse(T, S#state{file     = Xml});
-parse(["-o", Out | T], S) -> parse(T, S#state{outdir   = Out});
-parse(["-c", Cfg | T], S) -> parse(T, S#state{config   = Cfg});
-parse(["-cr", CR | T], S) -> parse(T, S#state{copyrt   =  CR});
-parse(["-ad", AD | T], S) -> parse(T, S#state{app_descr=  AD});
-parse(["-vsn", V | T], S) -> parse(T, S#state{version  =   V});
-parse(["-vars",V | T], S) -> parse(T, S#state{variants =   V});
-parse(["-sfx", V | T], S) -> parse(T, S#state{file_sfx =   V});
-parse(["-var", V | T], S) -> V1 = string:to_lower(V),
-                             parse(T, S#state{variant  = V1,
-                                              var_pfx  = V1++"_",
-                                              var_sfx  = "_"++V1
-                                             });
-parse(["-cdir",D | T], S) -> parse(T, S#state{cpp_path =   D});
-parse(["-edir",D | T], S) -> parse(T, S#state{erl_path =   D});
-parse(["-idir",D | T], S) -> parse(T, S#state{inc_path =   D});
-parse(["-d", Lvl | T], S) -> try
-                                I = list_to_integer(Lvl),
-                                parse(T, S#state{debug=I})
-                             catch _:_ ->
-                                parse([Lvl|T], S#state{debug=1})
-                             end;
-parse(["-e"      | T], S) -> parse(T, S#state{elixir   = true});
-parse(["-ge"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [erlang])});
-parse(["-gc"     | T], S) -> parse(T, S#state{gen      = lists:umerge(S#state.gen, [cpp])});
-parse(["-p", V   | T], S) -> true = code:add_patha(V), parse(T, S);
-parse(["-q"      | T], S) -> parse(T, S#state{quiet    = true});
-parse(["-d"      | T], S) -> parse(T, S#state{debug    = 1});
-parse(["-h"      | _],_S) -> usage();
-parse(["--help"  | _],_S) -> usage();
-parse([Other     | _],_S) -> throw({invalid_option, Other});
-parse([],              S) ->
-  %% Apply defaults here:
-  Vars0 = [I || I <- string:split(os:getenv("FIX_VARIANTS", ""), ";", all), I /= []],
-  length(Vars0) > 0 andalso S#state.file /= undefined
-    andalso abort("Cannot provide -f option when FIX_VARIANTS environment is set!"),
-
-  Vars      = nvl(S#state.variants, Vars0),
-  ScriptDir = S#state.src_dir,
-  CurDir    = S#state.cur_dir,
-
-  Schema    = filename:join(ScriptDir, S#state.schema),
-
-  S0 = S#state{base_dir = (ScriptDir == CurDir), schema = Schema},
-
-  %% If not in the source repository don't allow empty variants
-  S0#state.variant == ""
-    andalso not S0#state.base_dir
-    andalso abort("Must specify -var argument for the FIX variant!"),
-
-  S0#state.variant == "default"
-    andalso not S0#state.base_dir
-    andalso abort("Invalid FIX variant name '~s'", [S0#state.variant]),
-
-  V0 = [S0#state.variant]
-     / string:lowercase
-     / string:replace(" ", "")
-     / lists:flatten,
-
-  V  = nvl(V0, "default"),
-
-  S1 = S0#state{gen = nvl(S#state.gen, [erlang,cpp]), variant = V},
-  if
-    length(Vars) == 0 andalso V0 /= "" ->
-      os:putenv("FIX_XML_" ++ string:to_upper(V0), S#state.file),
-      S1#state{variants = [V]};
-    length(Vars) == 0 ->
-      os:putenv("FIX_XML_" ++ string:to_upper(V0), S#state.file),
-      S1#state{variants = [""]};
-    true ->
-      S1#state{variants = Vars}
-  end.
+  ok  = write_file(erlang, src, State, FN4++".erl", ["%% Metadata about FIX groups\n"], [
+    "-module(", FN4, ").\n\n",
+    "-include(\"", add_variant_suffix("fix.hrl", State), "\").\n"
+    "\n"
+    "-export([\n",
+    lists:map(fun({M,G,_}) ->
+      ["  decode_", atom_to_list(M), "_", atom_to_list(group_name(G)), "/2,\n"]
+    end, AllGrps),
+    "  decode_group/3\n",
+    "]).\n\n",
+    %% lists:map(fun({G, FF}) ->
+    %%   II = string:pad(integer_to_list(Name2ID(G)), MaxIDLen, leading),
+    %%   [
+    %%     "%% Group: ", atom_to_list(group_name(G)), "\n",
+    %%     [["is_grp_field(", II, ", ", string:pad(integer_to_list(ID), MaxIDLen, leading),
+    %%       ") -> true; %% ", atom_to_list(F), "\n"] || {F, ID, _Req, _IsGrp} <- FF],
+    %%     "is_grp_field(", II, ", _", string:pad("", MaxIDLen*2-4, leading), ") -> false;\n\n"
+    %%   ]
+    %% end, Groups),
+    %% "is_grp_field(_, ", string:pad("_", MaxIDLen*2-2), ") -> false.\n\n",
+    lists:map(fun({Msg, G, _FF}) ->
+      GA = sqpad(G, MaxNLen+2),
+      %%GN = spad(group_name(G),  MaxGrpLen),
+      MN = sqpad(Msg, MaxMsgLen),
+      ["decode_group(", MN, ", ", GA, ", L) -> decode_", atom_to_list(Msg), "_", atom_to_list(group_name(G)), "(L, ", undef(State), ", #group{name=", sq(G), "});\n"]
+    end, AllGrps),
+    "decode_group(_, _, _) -> false.\n\n",
+    lists:map(fun({Msg, G, FF}) ->
+      GN = atom_to_list(group_name(G)),
+      FN = atom_to_list(Msg) ++ "_" ++ GN,
+      ML = lists:max([length(atom_to_list(F)) || {F, _ID, _Req, _IsGrp} <- FF])+2,
+      [
+        "%% Parse Group: ", GN, " in message ", atom_to_list(Msg), "\n",
+        "decode_",  FN, "(L, R) -> decode_", FN, "(L, ", undef(State), ", R).\n",
+        "decode_",  FN, "([{", spad("Delim",ML+2), ",_,_,_}|_]=L, Delim, R) -> {L, R};\n",
+        [[
+          "decode_",  FN, "([{", spad(sq(F)++"=H", ML+2), ",V,_,_}|T], Delim, #group{fields=F} = R) ->"
+          " decode_", FN, "(T, def(Delim,H), R#group{fields = F#{", sqpad(F,ML), " => V}});\n"
+          ] || {F, _ID, _Req, _IsGrp} <- FF],
+        "decode_", FN, "(L, _Delim, R) -> {L, R}.\n\n"
+      ]
+    end, AllGrps),
+    "\n"
+    "def(undefined,N) -> N;\n"
+    "def(", undef(State), ",N) -> N;\n"
+    "def(Other,   _N) -> Other.\n"
+  ]).
 
 update(Variant, S = #state{config = CfgF}) ->
   File = os:getenv("FIX_XML_"++string:to_upper(Variant), undefined),
@@ -920,34 +965,6 @@ update(Variant, S = #state{config = CfgF}) ->
           var_sfx = iif(VEmpty, "", "_" ++ string:to_lower(Variant)),
           file    = File,
           config  = CC}.
-
-usage() ->
-  io:format(standard_error,
-    "Generate code from FIX XML specification file\n"
-    "Usage: ~s [-f File] [-o OutputDir] [-c ConfigFile.config]\n"
-    "     -f InputFile.xml\n"
-    "     -o OutputDir        - Output relative directory under RootDir (-r)\n"
-    "     -c Config           - Configuration file controlling behavior of the code generator (def: fix.config)\n"
-    "     -cr Copyright       - Add copyright text to generated files\n"
-    "     -ad AppDescr        - Application description added to the app.src file\n"
-    "     -e                  - Use Elixir atom prefixing\n"
-    "     -ge                 - Generate Erlang code only\n"
-    "     -gc                 - Generate C++ code only\n"
-    "     -sfx  FileSfx       - Suffix to add to generated filenames (default: Variant)\n"
-    "     -var  Variant       - FIX Variant name (this is a required argument)\n"
-    "     -cdir Path          - Output directory for C++ files    (default: ./c_src)\n"
-    "     -edir Path          - Output directory for Erlang files (default: ./src)\n"
-    "     -vsn  FixVSN        - Fix version tag (#8), default: \"FIX.4.4\"\n"
-    "     -q                  - Quiet (don't print WARNING's)\n"
-    "     -d [Level]          - Set debug level (no files get saved)\n"
-    "     -h | --help         - This help screen\n"
-    "\n"
-    "Config file (fix.config):\n"
-    "=========================\n"
-    "{include_app_messages, ['NewOrderSingle', ...]}.\n"
-    "\n"
-    , [filename:basename(escript:script_name())]),
-  halt(1).
 
 read_file(#state{file = Xml, schema = Schema, config = Config, debug = Debug}) ->
   InclMsgs   = proplists:get_value(include_app_messages, Config, []),
@@ -1313,6 +1330,7 @@ note(Type, #state{base_dir = IsBaseDir, copyrt = Copyright, copyyr = Year}) ->
   ].
 
 comment(cpp)    -> "//";
+comment(elixir) -> "##";
 comment(erlang) -> "%%".
 
 abort(Fmt, Opts / []) ->
@@ -1360,6 +1378,7 @@ write_file(Type, SrcOrInc, #state{outdir=Cwd, gen=Gen} = State, File, Header,
     true ->
       Dir =
         case {Type, SrcOrInc} of
+          {elixir, src} -> State#state.elixir_path;
           {erlang, src} -> State#state.erl_path;
           {erlang, inc} -> State#state.inc_path;
           {cpp,    src} -> State#state.cpp_path
@@ -1374,15 +1393,15 @@ write_file(Type, SrcOrInc, #state{outdir=Cwd, gen=Gen} = State, File, Header,
         _             ->
           io:format("Writing file:  ~s\n", [F]),
           ok   = file:write_file(F, Out)
-        end;
+      end;
     false ->
       ok
   end.
 
-copy_makefile(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath}) ->
-  IncDir   = filename:join(SrcDir, "c_src"),
-  Makefile = filename:join(filename:join(Cwd, CppPath), "Makefile"),
-  case filelib:is_regular(Makefile) of
+generate_build_files(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath} = State) ->
+  IncDir    = filename:join(SrcDir, "c_src"),
+  CMakefile = filename:join(filename:join(Cwd, CppPath), "Makefile"),
+  case filelib:is_regular(CMakefile) of
     true  -> ok;
     false ->
       DstFile = filename:join(CppPath, "Makefile"),
@@ -1391,5 +1410,40 @@ copy_makefile(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath}) ->
       {ok,F}  = file:read_file(SrcFile),
       Data    = re:replace(F, "INC_DIR\\s*:=[^\n]+", "INC_DIR := -I" ++ IncDir ++ "\n",
                            [{return, binary}]),
-      ok      = file:write_file(Makefile, Data)
+      ok      = file:write_file(CMakefile, Data)
+  end,
+  Rebar = "./rebar.config",
+  case filelib:is_regular(Rebar) of
+    true  -> ok;
+    false ->
+      io:format("Writing file:  ~s\n", [Rebar]),
+      ok = file:write_file(Rebar, [
+        "{deps, [\n"
+        "  {fix, \"1.0\", {git, \"git@github.com:saleyn/fix.git\", {branch, \"master\"}}}\n"
+        "]}.\n"
+        "\n"
+        "{erl_opts, [debug_info]}.\n"
+        "\n"
+        "{post_hooks, [\n"
+        "  {compile, \"elixirc -o _build/default/lib/", add_variant_suffix("fix", State), "/ebin src/*.ex\"}\n"
+        "]}.\n"
+      ])
+  end,
+  Makefile = "Makefile",
+  case filelib:is_regular(Makefile) of
+    true  -> ok;
+    false ->
+      io:format("Writing file:  ~s\n", [Makefile]),
+      ok = file:write_file(Makefile, [
+        "all: get-deps compile\n"
+        "\n"
+        "get-deps:\n"
+        "\trebar3 $@\n\n"
+        "compile: nif\n"
+        "\trebar3 $@\n\n"
+        "nif:\n"
+        "\tmake -C c_src\n\n"
+        "clean:\n"
+        "\trm -f c_src/*.o priv/*.so ebin/*.beam\n"
+      ])
   end.
