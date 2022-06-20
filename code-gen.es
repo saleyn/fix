@@ -747,7 +747,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
     "\n"
     "field(N) -> ", add_variant_suffix("fix_fields", State), ":field(N).\n\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
-    "  case decode_msg_header(Msg, #fix{", iif(State#state.elixir, ", header = #{'__struct__' => Elixir.FIX.Header}"),"}, 0, []) of\n"
+    "  case decode_msg_header(Msg, #fix{", iif(State#state.elixir, "header = #{'__struct__' => 'Elixir.FIX.Header'}"),"}, 0, []) of\n"
     "    {#fix{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
     "      {#fix{} = M, I1, U} = decode_msg(MT, L),\n"
     "      {I1, M#fix{header=H}, U};\n"
