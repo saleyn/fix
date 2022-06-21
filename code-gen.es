@@ -1473,15 +1473,34 @@ generate_build_files(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath} = 
     false ->
       io:format("Writing file:  ~s\n", [Makefile]),
       ok = file:write_file(Makefile, [
-        "all: get-deps compile\n"
+        "MIX_ENV ?= dev\n"
+        "profile=$(if $(as),$(as),$(MIX_ENV))\n"
         "\n"
-        "get-deps:\n"
-        "\trebar3 $@\n\n"
-        "compile: nif\n"
-        "\trebar3 $@\n\n"
+        "all: nif compile\n"
+        "\n"
+        "deps:\n",
+        if State#state.elixir ->
+          "\tmix deps.get\n\n"
+          "compile:\n"
+          "\tmix $@\n\n";
+        true ->
+          "\trebar3 $@\n\n"
+          "compile:\n"
+          "\trebar3 $@\n\n"
+        end,
         "nif:\n"
-        "\tmake -C c_src\n\n"
+        "\tPROFILE=$(profile) make -C c_src\n\n"
         "clean:\n"
         "\trm -f c_src/*.o priv/*.so ebin/*.beam\n"
+        "update upgrade:\n"
+        "\tmix deps.update fix\n\n"
+        "generate: deps/fix/code-gen.es spec/", State#state.variant, ".fix.xml\n"
+        "\t$< -f $(word $^,2) -var ", State#state.variant,
+        " -c fix_", State#state.variant, ".config -e \\n"
+        "    -a \"", State#state.app_descr, "\" -cr \"", State#state.copyrt,"\"",
+        "    -sfx \"", State#state.file_sfx, "\"\n\n"
+        "c_src src include:\n"
+        "\tmkdir -p $@\n\n"
+        ".PHONY: deps\n"
       ])
   end.
