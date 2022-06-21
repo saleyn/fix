@@ -250,6 +250,12 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "std::vector<Field> make_all_fields(FixVariant* fvar)\n"
     "{\n"
     "  assert(fvar);\n"
+    "  am_nil   = enif_make_atom(fvar->env(), \"", undef(State), "\");\n"
+    "  if (am_nil == 0) [[unlikely]] {\n"
+    "    fprintf(stderr, \"FIX(", State#state.variant, "): atom '", undef(State),
+                        "' not initialized!\\r\\n\");\n"
+    "    return std::vector<Field>();\n"
+    "  }\n\n"
     "  auto vec = std::vector<Field>(", integer_to_list(MaxID+1), ", Field{});\n",
     lists:map(fun(I) ->
       % ID::integer(), FieldName::quoted_string(), FieldType::string(),
@@ -989,12 +995,12 @@ read_file(#state{file = Xml, schema = Schema, config = Config, debug = Debug}) -
                    {name,          M} <- A,
                    C                  <- [get_attr(msgcat, A, app)],
                 C==admin orelse InclMsgs == [] orelse lists:member(M, InclMsgs)],
-  Fun        = fun G({_, _, _, FL}, Acc) -> lists:foldl(G, Acc, FL);
-                   G({field, A, _}, Acc) -> [get_attr(name,A)|Acc];
-                   G({group, A,FL}, Acc) -> lists:foldl(G, [get_attr(name,A)|Acc], FL)
-               end,
-  AllMsgs    = [Header, Trailer | Messages],
-  UsedFields = sets:from_list(lists:foldl(Fun, [], AllMsgs)),
+  %Fun        = fun G({_, _, _, FL}, Acc) -> lists:foldl(G, Acc, FL);
+  %                 G({field, A, _}, Acc) -> [get_attr(name,A)|Acc];
+  %                 G({group, A,FL}, Acc) -> lists:foldl(G, [get_attr(name,A)|Acc], FL)
+  %             end,
+  %AllMsgs    = [Header, Trailer | Messages],
+  %UsedFields = sets:from_list(lists:foldl(Fun, [], AllMsgs)),
 
   % Make sure that the names of messages are consistent with what's defined
   % in the field#35 (i.e. description of enum values of this field must match
@@ -1003,14 +1009,15 @@ read_file(#state{file = Xml, schema = Schema, config = Config, debug = Debug}) -
                             || {M, T, _C, _} <- Messages]},
   Fields2    = lists:reverse(
                 lists:foldl(fun({field, A, _} = F, Acc) ->
-                  Name = get_attr(name, A),
+                  %Name = get_attr(name, A),
                   case get_attr(number, A) of
                     35 -> [setelement(2, MsgTypes, A) | Acc];
-                    _  ->
-                      case sets:is_element(Name, UsedFields) of
-                        true  -> [F | Acc];
-                        false -> Acc
-                      end
+                    _  -> [F | Acc]
+                      % Filter out only used fields
+                      %case sets:is_element(Name, UsedFields) of
+                      %  true  -> [F | Acc];
+                      %  false -> Acc
+                      %end
                   end
                 end, [], Fields)),
 
@@ -1272,7 +1279,7 @@ atom_name(N, S)                     when is_atom(N) -> atom_name(atom_to_list(N)
 atom_name(N, #state{elixir = true}) when is_list(N) -> "Elixir." ++ N;
 atom_name(N, _)                     when is_list(N) -> N.
 
-%undef(#state{elixir = true}) -> "nil";
+undef(#state{elixir = true}) -> "nil";
 undef(_)                     -> "nil".
 
 qname(N, #state{} = S) ->

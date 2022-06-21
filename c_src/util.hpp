@@ -28,35 +28,33 @@
 
 #define DBGPRINT(Debug, Level, Fmt, ...)                  \
   do {                                                    \
-    if (Debug >= Level)                                   \
+    if (Debug >= Level) [[unlikely]]                      \
       PRINT(Fmt, __VA_ARGS__);                            \
   } while(0)
 
 #ifndef NDEBUG
 #define ASSERT(Cond, Begin, End)                          \
-  do {                                                    \
-    if (!(Cond)) [[unlikely]] {                           \
-      std::ofstream out("/tmp/dump.bin");                 \
-      out << std::string((const char*)Begin, End-Begin);  \
-      out.close();                                        \
-      fprintf(stderr, "Asserting failed [%s:%d]\r\n",     \
-              basename(__FILE__), __LINE__);              \
-      assert(Cond);                                       \
-    }                                                     \
-  } while(0)
+  if (!(Cond)) [[unlikely]] {                             \
+    std::ofstream out("/tmp/dump.bin");                   \
+    out << std::string((const char*)Begin, End-Begin);    \
+    out.close();                                          \
+    fprintf(stderr, "Asserting failed [%s:%d]\r\n",       \
+            basename(__FILE__), __LINE__);                \
+    assert(Cond);                                         \
+  } else {}
 #else
 #define ASSERT(Cond, Begin, End)
 #endif
 
 #ifndef NDEBUG
-#define DUMP(Begin, End)                                  \
-  do {                                                    \
+#define DUMP(Cond, Begin, End)                            \
+  if ((Cond) > 0) {                                       \
     std::ofstream out("/tmp/dump.bin");                   \
     out << std::string((const char*)Begin, End-Begin);    \
     out.close();                                          \
-  } while(0)
+  } else {}
 #else
-#define DUMP(Begin, End)
+#define DUMP(Cond, Begin, End)
 #endif
 
 //------------------------------------------------------------------------------
@@ -221,6 +219,22 @@ namespace {
     return p == end ? file : p+1;
   }
 }
+
+// Out of memory error
+struct enomem_error : public std::bad_alloc {
+  template <typename... Args>
+  enomem_error(const char* fmt, Args&&... args)
+  {
+    snprintf(buf, sizeof(buf), fmt, std::forward<Args>(args)...);
+  }
+
+  virtual ~enomem_error() noexcept {}
+
+  const char* what() const noexcept { return buf; }
+
+private:
+  char buf[128];
+};
 
 //------------------------------------------------------------------------------
 // Field
@@ -492,15 +506,15 @@ const Ch* str_to_int(const Ch* s, const Ch* end, T& res, char delim = '\0', char
   return s;
 }
 
-std::unique_ptr<ERL_NIF_TERM, void(*)(ERL_NIF_TERM*)>
-inline unique_term_ptr(void* ptr)
+inline std::unique_ptr<ERL_NIF_TERM, void(*)(ERL_NIF_TERM*)>
+unique_term_ptr(void* ptr)
 {
   return {(ERL_NIF_TERM*)ptr, [](ERL_NIF_TERM* p){ if (p) free((void*)p); }};
 }
 
 // A unique smart pointer that releases ErlNifBinary when it goes out of scope
-std::unique_ptr<ErlNifBinary, void(*)(ErlNifBinary*)>
-inline binary_guard(ErlNifBinary& bin)
+inline std::unique_ptr<ErlNifBinary, void(*)(ErlNifBinary*)>
+binary_guard(ErlNifBinary& bin)
 {
   return {&bin, [](ErlNifBinary* p){ if (p) enif_release_binary(p); }};
 }
@@ -671,13 +685,21 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
 // Use erl_make_copy() to copy shared binaries created by this function.
 // http://erlang.org/pipermail/erlang-questions/2019-February/097247.html
+// NOTE: check for am_enomem upon return!
 inline ERL_NIF_TERM create_binary(ErlNifEnv* env, const std::string_view& s)
 {
   ErlNifBinary bin;
   if (!enif_alloc_binary(s.size(), &bin)) [[unlikely]]
-    return enif_make_badarg(env);
+    return am_enomem;
   memcpy(bin.data, s.data(), s.size());
   return enif_make_binary(env, &bin);
+}
+
+// NOTE: check for am_enomem upon return!
+template <typename Ch>
+inline ERL_NIF_TERM create_binary(ErlNifEnv* env, const Ch* s, int len)
+{
+  return create_binary(env, std::string_view((const char*)s, len));
 }
 
 template <class... Args>
@@ -709,20 +731,25 @@ make_error(FixVariant* var, ErlNifEnv* env, const char* error, long pos, int tag
       am_reason
     };
 
+    auto reason = create_binary(env, buf, len);
+
     ERL_NIF_TERM values[] = {
       am_true,
       am_fix_error,
-      create_binary(env, std::string_view(buf, len)),
+      reason,
       enif_make_long(env, tag),
       enif_make_long(env, pos),
       enif_make_atom(env, error)
     };
 
-    ERL_NIF_TERM map;
-static_assert(std::extent<decltype(keys)>::value == 6);
-    if (enif_make_map_from_arrays(env, keys, values,
-                                  std::extent<decltype(keys)>::value, &map))
-      return enif_raise_exception(env, map);
+    if (reason != am_enomem) [[likely]] {
+      ERL_NIF_TERM map;
+
+      if (enif_make_map_from_arrays(env, keys, values,
+                                    std::extent<decltype(keys)>::value, &map))
+        return enif_raise_exception(env, map);
+    }
+    // Follow through with the general return
   }
 
   return enif_raise_exception(env,
@@ -794,9 +821,13 @@ Field::Field
 {
   assert(var);
   for(auto& fc : m_choices) {
+    auto val  = create_binary(var->env(),  fc.value);
+    if  (val == am_enomem) [[unlikely]]
+      throw enomem_error("Failed to allocate %d bytes of memory for field#%d",
+                         strlen(fc.value), id);
+
     m_max_val_len = std::max(strlen(fc.value), size_t(m_max_val_len));
-    m_atom_map.emplace(enif_make_atom(var->env(), fc.descr),
-                       create_binary(var->env(),  fc.value));
+    m_atom_map.emplace(enif_make_atom(var->env(), fc.descr), val);
     m_name_map.emplace(std::string_view(fc.value, strlen(fc.value)), &fc);
   }
 }
@@ -896,9 +927,14 @@ Field::meta(ErlNifEnv* env) const
   std::vector<ERL_NIF_TERM> choices;
   choices.reserve(m_choices.size());
 
-  for (auto c : m_choices)
+  for (auto c : m_choices) {
+    auto val = create_binary(env, c.value);
+    if (val == am_enomem) [[unlikely]]
+      return enif_raise_exception(m_var->env(), am_enomem);
+
     choices.push_back(
-      enif_make_tuple2(env, create_binary(env, c.value), c.get_atom(env)));
+      enif_make_tuple2(env, val, c.get_atom(env)));
+  }
 
   std::vector<ERL_NIF_TERM> res{{
     enif_make_tuple2(env, enif_make_atom(env, "id"),   enif_make_long(env, m_id)),
@@ -947,7 +983,8 @@ Field::decode(ErlNifEnv* env, const char* code, int len)
 
   assert(m_decf);
 
-  return m_decf(*this, env, code, len);
+  auto res = m_decf(*this, env, code, len);
+  return IS_LIKELY(res != 0) ? res : am_nil;
 }
 
 // Find a value of the field as a term in the map identified by the atom value
@@ -1267,7 +1304,11 @@ inline FixVariant
     DBGPRINT(m_pers->debug(), 4, "FIX(%s): initializing binary: %s",
       m_variant.c_str(), s);
 
-    m_bins.emplace_back(create_binary(env(), std::string_view(s, len)));
+    auto val = create_binary(env(), s, len);
+    if (val == am_enomem) [[unlikely]]
+      throw enomem_error("Error allocating %d bytes of memory", len);
+
+    m_bins.emplace_back(val);
 
     // Populate the map that converts field names to tags
     if (m_fields[i].id() == 0)
@@ -1452,19 +1493,22 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
   if (*(msg_end-1) != soh) [[unlikely]]
     return make_error(fvar, env, "invalid_msg_terminator", msg_len, 0);
 
-  DUMP(begin, msg_end);  // For debugging in case of a crash
+  DBGPRINT(fvar->debug(), 1, "FIX(%s): got message of size %d",
+    fvar->variant().c_str(), msg_len);
+
+  DUMP(fvar->debug(), begin, msg_end);  // For debugging in case of a crash
 
   auto  state = ParserState(ParserState::CODE);
   int   code  = 0;
   auto* field = fvar->field(0);
 
   int  next_data_length = -1;
-  int  reply_capacity   = 16;
+  int  reply_capacity   = 24;
   int  reply_size       = 0;
   auto reply       = unique_term_ptr(calloc(reply_capacity, sizeof(ERL_NIF_TERM)));
   auto ptr         = begin;
-  auto tag_begin   = ptr;
-  auto tag_end     = ptr;
+  auto val_begin   = ptr;
+  auto val_end     = ptr;
   ERL_NIF_TERM tag = 0;
 
   if (!reply) [[unlikely]]
@@ -1472,17 +1516,18 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   // Add {Tag::atom(),  Val::any(), TagCode::integer(),
   //         {ValOffset::integer(), ValLen ::integer()}}
-  auto append = [=, &reply, &reply_size, &tag_begin, &tag_end]
+  auto append = [=, &reply, &reply_size]
     (ERL_NIF_TERM tag, int code, ERL_NIF_TERM val)
   {
     // Don't include 'BeginString', 'BodyLength', 'CheckSum' when not requested
     if (!full && code >= 8 && code <= 10)
-      return;
+      return true;
 
     reply.get()[reply_size++] =
       enif_make_tuple4(env, tag, val, enif_make_int(env, code),
-        enif_make_tuple2(env, enif_make_int(env, tag_begin-begin),
-                              enif_make_int(env, tag_end-tag_begin)));
+        enif_make_tuple2(env, enif_make_int(env, val_begin-begin),
+                              enif_make_int(env, val_end-val_begin)));
+    return true;
   };
 
   for (const auto* p = ptr; ptr < msg_end; ptr = p) {
@@ -1503,21 +1548,27 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         if (reply_size >= reply_capacity - 1) {
           reply_capacity *= 2;
           int size        = reply_capacity*sizeof(ERL_NIF_TERM);
+
+          DBGPRINT(fvar->debug(), 2,
+            "FIX(%s): resizing reply to capacity: %d (size=%d)",
+            fvar->variant().c_str(), reply_capacity, size);
+
           reply.reset((ERL_NIF_TERM*)realloc(reply.release(), size));
+
           if (!reply)
             return make_error(fvar, env, "code_out_of_memory", ptr - begin, code);
         }
 
         tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
-            ? field->get_atom() : am_nil;
+            ? field->get_atom() : enif_make_long(env, code);
 
         ASSERT(*p == '=', begin, end);
-        tag_begin = tag_end = ++p; // Skip '='
+        val_begin = val_end = ++p; // Skip '='
 
         state = field->dtype();
 
         if (state == ParserState::UNDEFINED) [[unlikely]] {
-          state = ParserState::STRING;
+          state = ParserState::BINARY;
           next_data_length = -1;
         }
 
@@ -1539,8 +1590,15 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         auto is_length   = field->type() == FieldType::LENGTH && code != 9;
         next_data_length = IS_UNLIKELY(is_length) ? ival : -1;
 
-        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
-                                    : enif_make_long(env, ival);
+        auto def = [=]() { return enif_make_long(env, ival); };
+
+        value = field->has_values()
+              ? field->decode(env, (const char*)ptr, p-ptr, def)
+              : enif_make_long(env, ival);
+
+        if (value == am_nil) [[unlikely]]
+          value = enif_make_long(env, ival);
+
         break;
       }
 
@@ -1640,20 +1698,16 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
         ASSERT(field, begin, end);
 
-        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
+        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr, def)
                                     : am_nil;
-        if (value == am_nil) {
-          auto len = p - ptr;
-          if (ret_binary) {
-            auto data = enif_make_new_binary(env, len, &value);
-            if (!data)
-              return make_error(fvar, env, "string_alloc_binary", ptr-begin, code);
-            memcpy(data, ptr, len);
-          } else
-            value = enif_make_tuple2(env,
-                      enif_make_uint(env, ptr-begin),
-                      enif_make_uint(env, len));
-        }
+        if (value == am_nil) [[unlikely]]
+          value = ret_binary
+                ? create_binary(env, p, p-ptr)
+                : enif_make_tuple2(env, enif_make_uint(env, ptr-begin),
+                                   enif_make_uint(env, p-ptr));
+
+        if (value == am_nil) [[unlikely]]
+          return make_error(fvar, env, "string_alloc_binary", ptr-begin, code);
 
         break;
       }
@@ -1688,8 +1742,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
         value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
                                     : enif_make_int(env, (int)*ptr);
-        if (value == am_nil)
-          enif_make_int(env, (int)*ptr);
+        if (value == am_nil) [[unlikely]]
+          value = enif_make_int(env, (int)*ptr);
 
         break;
       }
@@ -1704,12 +1758,20 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
       return make_error(fvar, env, "missing_soh", ptr - begin, code);
 
     state   = ParserState::CODE;
-    tag_end = p++;  // Skip SOH
+    val_end = p++;  // Skip SOH
 
-    append(tag, code, value); // Append the value to the result array
+    DBGPRINT(fvar->debug(), 2, "  [%02d] Field%5d: \"%s\"", reply_size, code,
+      std::string((const char*)val_begin, val_end-val_begin).c_str());
+
+    // Append the value to the result array
+    if (!append(tag, code, value)) [[unlikely]]
+      return make_error(fvar, env, "out_of_memory", ptr-begin, code);
   }
 
   begin = ptr;
-  return enif_make_tuple3(env, am_ok, enif_make_int(env, msg_len),
-    enif_make_list_from_array(env, (ERL_NIF_TERM*)reply.get(), reply_size));
+
+  auto res = enif_make_list_from_array(env, (ERL_NIF_TERM*)reply.get(), reply_size);
+  return res
+       ? enif_make_tuple3(env, am_ok, enif_make_int(env, msg_len), res)
+       : make_error(fvar, env, "error_in_make_list_from_array", ptr-begin, code);
 }
