@@ -298,7 +298,15 @@ struct Field {
 
   std::vector<FieldChoice> const& values() const { return m_choices; }
 
-  ERL_NIF_TERM decode(ErlNifEnv* env, const char* code, int len);
+  template <typename Def>
+  ERL_NIF_TERM decode(ErlNifEnv* env, const char* code, int len, const Def& def);
+
+  ERL_NIF_TERM decode(ErlNifEnv* env, const char* code, int len)
+  {
+    auto   def = []() { return am_nil; };
+    return decode(env, code, len, def);
+  }
+
 
   // Find a value of the field as a term in the map identified by the atom value
   // and return a copy suitable for returning from a NIF.
@@ -975,8 +983,9 @@ Field::value_atom(unsigned idx) const
                                 : enif_make_badarg(m_var->env());
 }
 
+template <typename Def>
 inline ERL_NIF_TERM
-Field::decode(ErlNifEnv* env, const char* code, int len)
+Field::decode(ErlNifEnv* env, const char* code, int len, const Def& def)
 {
   if (!m_decf || len < 1 || len > m_max_val_len) [[unlikely]]
     return am_nil;
@@ -984,7 +993,8 @@ Field::decode(ErlNifEnv* env, const char* code, int len)
   assert(m_decf);
 
   auto res = m_decf(*this, env, code, len);
-  return IS_LIKELY(res != 0) ? res : am_nil;
+
+  return IS_LIKELY(res != 0) ? res : def();
 }
 
 // Find a value of the field as a term in the map identified by the atom value
@@ -1698,14 +1708,15 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
         ASSERT(field, begin, end);
 
-        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr, def)
-                                    : am_nil;
-        if (value == am_nil) [[unlikely]]
-          value = ret_binary
+        auto def = [=]() {
+          return  ret_binary
                 ? create_binary(env, p, p-ptr)
                 : enif_make_tuple2(env, enif_make_uint(env, ptr-begin),
                                    enif_make_uint(env, p-ptr));
+        };
 
+        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr, def)
+                                    : am_nil;
         if (value == am_nil) [[unlikely]]
           return make_error(fvar, env, "string_alloc_binary", ptr-begin, code);
 
@@ -1740,11 +1751,11 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         if (++p == end || *p != soh)
           return make_error(fvar, env, "char_soh", ptr - begin, code);
 
-        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
-                                    : enif_make_int(env, (int)*ptr);
-        if (value == am_nil) [[unlikely]]
-          value = enif_make_int(env, (int)*ptr);
+        auto def = [=]() { return enif_make_int(env, int(*ptr)); };
 
+        value = field->has_values()
+              ? field->decode(env, (const char*)ptr, p-ptr, def)
+              : enif_make_int(env, (int)*ptr);
         break;
       }
       default:
