@@ -8,7 +8,9 @@
 %%------------------------------------------------------------------------------
 -module(fix_native).
 
--export([split/2, split/3, encode_field/3, decode_field/3, decode_field/4]).
+-export([split/2, split/3, encode_field/3]).
+-export([decode_field/3, decode_field/4, decode_field/5]).
+-export([to_decimal/1, to_binary/1]).
 
 -compile({parse_transform, ct_expand}). %% See parse_trans library
 
@@ -20,7 +22,8 @@ split(DecoderMod, Bin = <<"8=FIX", _/binary>>, Opts) ->
   case binary:match(Bin, [<<1>>,<<$|>>]) of
     {I,1} ->
       IsFull = lists:member(full, Opts),
-      case split2(DecoderMod, Bin, binary:at(Bin, I)) of
+      Float  = proplists:get_value(float, Opts, float),
+      case split2(DecoderMod, Bin, binary:at(Bin, I), Float) of
         Res = {ok, _Len, _Msgs} when IsFull ->
           Res;
         {ok, Len, Msg} ->
@@ -30,27 +33,39 @@ split(DecoderMod, Bin = <<"8=FIX", _/binary>>, Opts) ->
       {error, {missing_soh, 0, 8}}
   end.
 
-split2(DecoderMod, Bin,  1) ->
-  split3(DecoderMod, Bin,  1, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^\1]+)\1">>))));
-split2(DecoderMod, Bin, $|) ->
-  split3(DecoderMod, Bin, $|, ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^|]+)\\|">>)))).
+split2(DecoderMod, Bin,  1, FloatAs) ->
+  Rex = ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^\1]+)\1">>))),
+  split3(DecoderMod, Bin,  1, Rex, FloatAs);
+split2(DecoderMod, Bin, $|, FloatAs) ->
+  Rex = ct_expand:term(element(2,re:compile(<<"([0-9]+)=([^|]+)\\|">>))),
+  split3(DecoderMod, Bin, $|, Rex, FloatAs).
 
-decode_field(DecoderMod, T={_,_}, V={_,_}, Bin) ->
+decode_field(DecoderMod, Tag, Value, Bin) ->
+  decode_field(DecoderMod, Tag, Value, Bin, binary).
+
+decode_field(DecoderMod, T={_,_}, V={_,_}, Bin, FloatAs) ->
   Tag = binary:part(Bin, T),
   Val = binary:part(Bin, V),
-  decode_field2(DecoderMod, Tag, Val, V).
+  decode_field2(DecoderMod, Tag, Val, FloatAs, V).
 
 decode_field(DecoderMod, Key, Val) ->
-  {Name, V, Tag, _} = decode_field2(DecoderMod, Key, Val, undefined),
+  {Name, V, Tag, _} = decode_field2(DecoderMod, Key, Val, binary, undefined),
   {Name, V, Tag}.
 
-decode_field2(DecoderMod, Key, Val, VP) when is_binary(Key), is_binary(Val) ->
+decode_field2(DecoderMod, Key, Val, FloatAs, VP) when is_binary(Key), is_binary(Val) ->
   Tag = binary_to_integer(Key),
   {N, V, Fun} =
     try
       case DecoderMod:field(Tag) of
         {Name, int,    F} -> {Name, binary_to_integer(Val), F};
-        {Name, float,  F} -> {Name, try binary_to_float(Val) catch _:_ -> float(binary_to_integer(Val)) end, F};
+        {Name, float,  F} ->
+          VV =
+            case FloatAs of
+              binary  -> Val;
+              decimal -> to_decimal(Val);
+              float   -> try binary_to_float(Val) catch _:_ -> float(binary_to_integer(Val)) end
+            end,
+          {Name, VV, F};
         {Name, length, F} -> {Name, binary_to_integer(Val), F};
         {Name, string, F} -> {Name, Val, F};
         {Name, binary, F} -> {Name, Val, F};
@@ -84,7 +99,7 @@ filter_field('Elixir.CheckSum')    -> false;
 filter_field('CheckSum')           -> false;
 filter_field(_)                    -> true.
 
-split3(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) ->
+split3(DecoderMod, Bin, Delim, Rex, FloatAs) when is_atom(DecoderMod), is_tuple(Rex) ->
   case binary:match(Bin, <<Delim, "9=">>) of
     {I,N} when byte_size(Bin) > I+N+10 ->
       M = I+N,
@@ -93,8 +108,8 @@ split3(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) 
       Size = M+Len + Val + 8,  %% 9=XXXX|....|10=XXX|
       case Bin of
         <<B:Size/binary, _/binary>> ->
-          {match, L} = re:run(B, Regex, [{capture, all_but_first}, global]),
-          Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V, Bin) end,
+          {match, L} = re:run(B, Rex, [{capture, all_but_first}, global]),
+          Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V, Bin, FloatAs) end,
           {ok, Size, lists:map(Fun, L)};
         _ ->
           {more, Size - byte_size(Bin)}
@@ -103,22 +118,46 @@ split3(DecoderMod, Bin, Delim, Regex) when is_atom(DecoderMod), is_tuple(Regex) 
       {more, 25}
   end.
 
-split3(DecoderMod, Bin, Delim) when is_atom(DecoderMod) ->
-  case binary:match(Bin, <<Delim, "9=">>) of
-    {I,N} when byte_size(Bin) > I+N+10 ->
-      M = I+N,
-      %% NOTE: Len includes delimiter
-      {Len, Val} = fix_nif:bin_to_integer(Bin, [{offset, M}, {delim, Delim}]),
-      Size = M+Len + Val + 8,  %% 9=XXXX|....|10=XXX|
-      case Bin of
-        <<B:Size/binary, _/binary>> ->
-          L = [binary:split(KV, <<"=">>)
-                || KV <- binary:split(B, <<Delim>>, [global, trim])],
-          Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V) end,
-          {ok, Size, lists:map(Fun, L)};
-        _ ->
-          {more, Size - byte_size(Bin)}
-      end;
-    _ ->
-      {more, 25}
+to_binary({decimal, Mant, Prec}) when is_integer(Mant), is_integer(Prec) ->
+  I = pow10(Prec),
+  M = Mant div I,
+  R = Mant - M*I,
+  B = integer_to_binary(M),
+  if R == 0 ->
+    B;
+  true ->
+    B2 = integer_to_binary(R),
+    <<B/binary, $., B2/binary>>
   end.
+
+to_decimal(V) when is_binary(V) ->
+  case binary:split(V, <<".">>) of
+    [Int, Frac] ->
+      Prec = byte_size(Frac),
+      {decimal, binary_to_integer(Int) * pow10(Prec) + binary_to_integer(Frac), Prec};
+    [Int] ->
+      {decimal, binary_to_integer(Int), 0}
+  end.
+
+pow10(0) -> 1;
+pow10(I) -> 10*pow10(I-1).
+
+%split3(DecoderMod, Bin, Delim, FloatAs) when is_atom(DecoderMod) ->
+%  case binary:match(Bin, <<Delim, "9=">>) of
+%    {I,N} when byte_size(Bin) > I+N+10 ->
+%      M = I+N,
+%      %% NOTE: Len includes delimiter
+%      {Len, Val} = fix_nif:bin_to_integer(Bin, [{offset, M}, {delim, Delim}]),
+%      Size = M+Len + Val + 8,  %% 9=XXXX|....|10=XXX|
+%      case Bin of
+%        <<B:Size/binary, _/binary>> ->
+%          L = [binary:split(KV, <<"=">>)
+%                || KV <- binary:split(B, <<Delim>>, [global, trim])],
+%          Fun  =  fun([Tag,V]) -> decode_field(DecoderMod, Tag, V, FloatAs) end,
+%          {ok, Size, lists:map(Fun, L)};
+%        _ ->
+%          {more, Size - byte_size(Bin)}
+%      end;
+%    _ ->
+%      {more, 25}
+%  end.

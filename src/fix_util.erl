@@ -161,6 +161,9 @@ split(native, CodecMod, Bin,_Opts) -> fix_native:split(CodecMod, Bin).
 try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, $Y);
 try_encode_val(ID, bool,   false)                -> encode_tagval(ID, $N);
 try_encode_val(ID, int,    V) when is_integer(V) -> encode_tagval(ID, integer_to_binary(V));
+try_encode_val(ID, float,  V) when is_float(V)   -> encode_tagval(ID, float_to_binary(V, [{decimals, 10}, compact]));
+try_encode_val(ID, float,  V) when is_binary(V)  -> encode_tagval(ID, V);
+try_encode_val(ID, float,  V={decimal,_,_})      -> fix_native:to_binary(V), encode_tagval(ID, V);
 try_encode_val(ID, length, V) when is_integer(V) -> encode_tagval(ID, integer_to_binary(V));
 try_encode_val(ID, char,   V) when is_integer(V), V >= $!, V =< $~ -> encode_tagval(ID, $V);
 try_encode_val(ID, string, V) when is_list(V)    -> encode_tagval(ID, list_to_binary(V));

@@ -974,6 +974,31 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
         : snprintf((char*)tmp, sizeof(tmp), "%ld", n);
       bval.data = tmp;
     }
+    else if (m_dtype == DataType::DOUBLE && !enif_is_binary(env, val)) {
+      double d;
+      int    arity, prec;
+      long   mant;
+      const  ERL_NIF_TERM* tup;
+      if (enif_get_double(env, val, &d)) {
+        bval.size = snprintf((char*)tmp, sizeof(tmp), "%.10f", d);
+        bval.data = tmp;
+      }
+      else if (enif_get_tuple   (env, val, &arity, &tup) && arity == 3 &&
+               enif_is_identical(am_decimal, tup[0]) &&
+               enif_get_long    (env, tup[1], &mant) &&
+               enif_get_int     (env, tup[2], &prec)) {
+        long pow = 1;
+        for (auto i=0; i < prec; ++i) pow *= 10;
+        auto mm = long(mant / pow);
+        auto pp = mant - mm*pow;
+        bval.size = prec==0
+                  ? snprintf((char*)tmp, sizeof(tmp), "%ld", mant)
+                  : snprintf((char*)tmp, sizeof(tmp), "%ld.%*ld", mm, prec, pp);
+        bval.data = tmp;
+      }
+      else if (!enif_inspect_binary(env, val, &bval))
+        return am_error;
+    }
     else if (!enif_inspect_binary(env, val, &bval))
       return am_error;
   }
