@@ -530,7 +530,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "-spec split(nif|native, binary(), [binary|full]) ->\n"
     "        [{atom(), binary()|{integer(),integer()}, any(), {integer(),integer()}}].\n"
     "split(Mode, Bin, Opts) when is_atom(Mode), is_binary(Bin), is_list(Opts) ->\n"
-    "  fix_util:split(Mode, ?FIX_VARIANT, Bin, Opts).\n"
+    "  fix_util:split(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Bin, Opts).\n"
     "\n"
 
     "-spec encode(#fix{}) -> binary().\n"

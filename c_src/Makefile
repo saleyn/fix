@@ -19,10 +19,10 @@ all: $(TARGETS)
 
 # System type and C compiler/flags.
 
-ifeq ($(REBAR_ENV),test)
+ifneq ($(or $(findstring $(NIF_DEBUG),1 true),$(findstring test,$(REBAR_ENV))),)
   ADDFLAGS := -g -DDEBUG -O0
 else
-  ADDFLAGS := -O3
+  ADDFLAGS := -O3 -DNDEBUG
 endif
 
 UNAME_SYS  := $(shell uname -s)

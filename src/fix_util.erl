@@ -10,7 +10,7 @@
 -include("fix.hrl").
 
 -export([now/0, timestamp/0, timestamp/1, decode/5,
-         dumpstr/1, dump/1, undump/1, split/4]).
+         dumpstr/1, dump/1, undump/1, split/5]).
 -export([try_encode_val/3, try_encode_group/3]).
 -export([encode_tagval/2,  encode_tagval/3]).
 -export([find_variants/0]).
@@ -155,8 +155,8 @@ find_variants() ->
 do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
 do_split(native, CodecMod, _Variant, Bin, Opts) -> fix_native:split(CodecMod, Bin, Opts).
 
-split(nif,    Variant,  Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
-split(native, CodecMod, Bin,_Opts) -> fix_native:split(CodecMod, Bin).
+split(nif,   _CodecMod, Variant,  Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
+split(native, CodecMod,_Variant, Bin,_Opts)  -> fix_native:split(CodecMod, Bin).
 
 try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, $Y);
 try_encode_val(ID, bool,   false)                -> encode_tagval(ID, $N);
