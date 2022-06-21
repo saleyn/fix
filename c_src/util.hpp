@@ -15,19 +15,49 @@
 #include <cassert>
 #include <string>
 #include <filesystem>
+#ifndef NDEBUG
+#include <fstream>
+#endif
 
 #define IS_LIKELY(Expr)   __builtin_expect(!!(Expr), 1)
 #define IS_UNLIKELY(Expr) __builtin_expect(!!(Expr), 0)
 
-#define PRINT(Fmt, ...)                                 \
-  fprintf(stderr, Fmt " [%s:%d]\r\n", __VA_ARGS__,      \
+#define PRINT(Fmt, ...)                                   \
+  fprintf(stderr, Fmt " [%s:%d]\r\n", __VA_ARGS__,        \
           basename(__FILE__), __LINE__)
 
-#define DBGPRINT(Debug, Level, Fmt, ...)                \
-  do {                                                  \
-    if (Debug >= Level)                                 \
-      PRINT(Fmt, __VA_ARGS__);                          \
+#define DBGPRINT(Debug, Level, Fmt, ...)                  \
+  do {                                                    \
+    if (Debug >= Level)                                   \
+      PRINT(Fmt, __VA_ARGS__);                            \
   } while(0)
+
+#ifndef NDEBUG
+#define ASSERT(Cond, Begin, End)                          \
+  do {                                                    \
+    if (!(Cond)) [[unlikely]] {                           \
+      std::ofstream out("/tmp/dump.bin");                 \
+      out << std::string((const char*)Begin, End-Begin);  \
+      out.close();                                        \
+      fprintf(stderr, "Asserting failed [%s:%d]\r\n",     \
+              basename(__FILE__), __LINE__);              \
+      assert(Cond);                                       \
+    }                                                     \
+  } while(0)
+#else
+#define ASSERT(Cond, Begin, End)
+#endif
+
+#ifndef NDEBUG
+#define DUMP(Begin, End)                                  \
+  do {                                                    \
+    std::ofstream out("/tmp/dump.bin");                   \
+    out << std::string((const char*)Begin, End-Begin);    \
+    out.close();                                          \
+  } while(0)
+#else
+#define DUMP(Begin, End)
+#endif
 
 //------------------------------------------------------------------------------
 // Static variables
@@ -1422,6 +1452,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
   if (*(msg_end-1) != soh) [[unlikely]]
     return make_error(fvar, env, "invalid_msg_terminator", msg_len, 0);
 
+  DUMP(begin, msg_end);  // For debugging in case of a crash
+
   auto  state = ParserState(ParserState::CODE);
   int   code  = 0;
   auto* field = fvar->field(0);
@@ -1466,7 +1498,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         field = (code > 0 && code < fvar->field_count())
               ? fvar->field(code) : fvar->field(0);
 
-        assert(field);
+        ASSERT(field, begin, end);
 
         if (reply_size >= reply_capacity - 1) {
           reply_capacity *= 2;
@@ -1479,7 +1511,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
             ? field->get_atom() : am_nil;
 
-        assert(*p == '=');
+        ASSERT(*p == '=', begin, end);
         tag_begin = tag_end = ++p; // Skip '='
 
         state = field->dtype();
@@ -1489,7 +1521,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           next_data_length = -1;
         }
 
-        assert(state != ParserState::UNDEFINED && state != ParserState::CODE);
+        ASSERT(state != ParserState::UNDEFINED && state != ParserState::CODE,
+               begin, end);
 
         continue;
 
@@ -1499,7 +1532,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         if (p == nullptr)
           return make_error(fvar, env, "int", ptr - begin, code);
 
-        assert(field);
+        ASSERT(field, begin, end);
 
         // Field number 9 is special, as it indicates the length of the FIX
         // message payload, so treat it as integer
@@ -1547,7 +1580,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           double res = double(mant) + (mant < 0 ? -frac : +frac);
           value      = enif_make_double(env, res);
         } else {
-          assert(double_fmt == DoubleFmt::Decimal);
+          ASSERT(double_fmt == DoubleFmt::Decimal, begin, end);
           value = enif_make_tuple3(env, am_decimal,
                     enif_make_long(env, n), enif_make_long(env, i - tmp));
         }
@@ -1605,7 +1638,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         if (*p != soh || p >= end)
           return make_error(fvar, env, "string", ptr - begin, code);
 
-        assert(field);
+        ASSERT(field, begin, end);
 
         value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr)
                                     : am_nil;

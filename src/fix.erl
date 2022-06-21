@@ -27,6 +27,9 @@ tag_to_field(FixVariant, Field) ->
 field_to_tag(FixVariant, Field) ->
   fix_nif:field_to_tag(FixVariant, Field).
 
+-spec encode_field_value(atom(), atom()|integer(),
+        binary()|boolean()|atom()|float()|integer()|
+        {decimal,Mantissa::integer(),Precision::integer()}) -> binary().
 encode_field_value(FixVariant, Field, Value) ->
   fix_nif:encode_field_value(FixVariant, Field, Value).
 

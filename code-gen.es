@@ -711,9 +711,11 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
       "end\n\n",
       lists:map(fun({Enum, _Descr}) ->
         try
-          {Msg, _Type, app, Fields} = get_msg_info(Enum, Messages),
+          {Msg, _Type, Category, Fields} = get_msg_info(Enum, Messages),
           [
             "defmodule FIX.", atom_to_list(Msg), " do\n"
+            "  @moduledoc \"", iif(Category==admin, "Admin", "Application"),
+            " ", atom_to_list(Msg), " message\"\n"
             "  defstruct [\n",
             align_table(
               [{"    "++atom_to_list(get_attr(name, A))++": ", "nil,\n"}
