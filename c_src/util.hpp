@@ -1720,7 +1720,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         ASSERT(field, begin, end);
 
         auto def = [=]() {
-          return ret_binary ? create_binary(env, p, p-ptr)
+          return ret_binary ? create_binary(env, ptr, p-ptr)
                             : enif_make_tuple2(env,
                                 enif_make_uint(env, ptr-begin),
                                 enif_make_uint(env, p-ptr));
