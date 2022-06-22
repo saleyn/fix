@@ -298,8 +298,6 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
         LE  = iif(Vals==[], 0, lists:max([length(CC) || {CC,  _} <- Vals])),
         LEn = length(integer_to_list(LE)),
         LL  = length(Vals),
-        ME  = LE+2,
-        MD  = iif(Vals==[], 0, lists:max([length(atom_name(caml_case(DD),State)) || {_,DD} <- Vals])+2),
         NVals = lists:zip(lists:seq(0, LL-1), Vals),
         [
         "  vec[", spad(I, WID), "] = Field{      //--- Tag# ", integer_to_list(I), " ", q(Name), "\n",
@@ -309,11 +307,11 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
         "    FieldType::", Type, ",\n"
         "    ", dtype(RawType, MapDT), ",\n"
         "    std::vector<FieldChoice>", iif(Vals==[], "(),", "{{"), "\n",
-        lists:map(fun({II,{CC,DD}}) ->
-          io_lib:format(
-        "      {.value = ~s, .descr = ~s, .atom = 0}, // ~w\n",
-                        [qpad(CC,ME), qpad(atom_name(caml_case(DD),State), MD), II])
-        end, NVals),
+        align_table(
+          [{"      {.value = "++q(CC),
+            ", .descr = "++q(atom_name(caml_case(DD),State,ID)),
+            ", .atom = 0}, // ", integer_to_list(II)++"\n"}
+          || {II,{CC,DD}} <- NVals]),
         iif(Vals==[], "", "    }},\n"),
         "    ", iif(LenFldName==[], "nullptr", LenFldName), ",\n"
         "    ", integer_to_list(LenFldID), ",\n",
@@ -450,33 +448,34 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
 
     [begin
       Tp = maps:get(Type, MapDT),
-      LE = lists:max([length(CC1) || {CC1,_} <- Vals]),
-      ME = LE+2,
       IL = integer_to_list(ID),
-      MD = lists:max([length(atom_name(caml_case(DD1),State)) || {_,DD1} <- Vals])+2,
       IsBool = Type == 'BOOLEAN' andalso [C || {C,_} <- Vals] == ["N","Y"],
       ["\ndecode_fld_val", IL, "(Val) ->\n",
-       "  case Val of",
+       "  case Val of\n",
        if IsBool ->
-         ["\n    <<\"N\">> -> false;"
-          "\n    <<\"Y\">> -> true;"];
+         ["    <<\"N\">> -> false;\n"
+          "    <<\"Y\">> -> true;\n"];
        true ->
-         [begin
-            MD = lists:max([length(atom_name(caml_case(DD1),State)) || {_,DD1} <- Vals])+2,
-            io_lib:format("\n    <<~s>> -> ~s; %% ~w",
-                          [qpad(CC,ME), string:pad(qname(caml_case(DD),State), MD), II])
-          end || {II,{CC,DD}} <- lists:zip(lists:seq(0, length(Vals)-1), Vals)]
+         align_table([
+           {"    <<"++q(CC), ">> -> " ++ sq(atom_name(caml_case(DD),State,ID)) ++ "; ", "%% " ++ integer_to_list(II) ++ "\n"}
+            || {II,{CC,DD}} <- lists:zip(lists:seq(0, length(Vals)-1), Vals)
+         ] ++
+         [{"    _", "   -> Val", "\n"}])
        end,
-       "\n    ", string:pad("_", ME+4), " -> Val"
-       "\n  end.\n\n",
+       "  end.\n\n",
        if Tp /= group ->
          if IsBool ->
-           [["encode_fld_val", IL, "(ID,_T, ", C1, ") -> encode_tagval(ID, <<",q(V1),">>)", T1, $\n]
-             || {C1, V1, T1} <- [{"false", "N", ";"}, {"true ", "Y", "."}]];
+           align_table([
+            {"encode_fld_val"++IL++"(ID,_T, "++C1++")", " -> encode_tagval(ID, <<"++q(V1)++">>)"++T1++"\n"}
+             || {C1, V1, T1} <- [{"false", "N", ";"}, {"true ", "Y", "."}]
+           ]);
          true ->
-           [[["encode_fld_val", IL, "(ID,_T, ", sqpad(atom_name(caml_case(DD),State), MD), ") -> encode_tagval(ID, <<",
-            qpad(CC,ME), ">>);\n"] || {CC,DD} <- Vals],
-           "encode_fld_val", IL, "(ID, T, ", string:pad("V",MD), ") -> try_encode_val(ID, T, V).\n"]
+          align_table([
+            {"encode_fld_val"++IL++"(ID,_T, "++lists:flatten(sq(atom_name(caml_case(DD),State,ID)))++")",
+             " -> encode_tagval(ID, <<"++q(CC)++">>);\n"}
+             || {CC,DD} <- Vals
+          ] ++
+          [{"encode_fld_val"++IL++"(ID, T, V)", " -> try_encode_val(ID, T, V).\n"}])
          end;
        true ->
          []
@@ -701,39 +700,40 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
   ]),
 
   if State#state.elixir ->
-    {_Msg0, _Type0, _Cat0, HFields} = Header,
-    ReqFlds = [get_attr(name, A) || {_FldOrGrp, A, _} <- HFields, get_attr(required, A)],
+    {_Msg0, _Type0, _Cat0, _HFields} = Header,
+    %ReqFlds = [get_attr(name, A) || {_FldOrGrp, A, _} <- HFields, get_attr(required, A)],
 
     FN3 = add_variant_suffix("fix_structs.ex", State),
     ok  = write_file(elixir, src, State, FN3, [], [
-      "defmodule FIX.Header do\n"
-      "  defstruct [\n",
-      align_table([{"    "++atom_to_list(F)++": ", "nil,\n"} || F <- ReqFlds]),
-      "  ]\n"
-      "end\n\n",
+      %"defmodule FIX.Header do\n"
+      %"  defstruct [\n",
+      %align_table([{"    "++atom_to_list(F)++": ", "nil,\n"} || F <- ReqFlds]),
+      %"  ]\n"
+      %"end\n\n",
       "defmodule FIX.ParserError do\n"
       "  defexception [:tag, :pos, :reason, :message, :bin, :src]\n\n"
       "  def message(e), do: e.message\n"
-      "end\n\n",
-      lists:map(fun({Enum, _Descr}) ->
-        try
-          {Msg, _Type, Category, Fields} = get_msg_info(Enum, Messages),
-          [
-            "defmodule FIX.", atom_to_list(Msg), " do\n"
-            "  @moduledoc \"", iif(Category==admin, "Admin", "Application"),
-            " ", atom_to_list(Msg), " message\"\n"
-            "  defstruct [\n",
-            align_table(
-              [{"    "++atom_to_list(get_attr(name, A))++": ", "nil,\n"}
-                || {_Tag, A, _} <- Fields, get_attr(required, A) == true]
-            ),
-            "  ]\n"
-            "end\n\n"
-          ]
-        catch _:_ ->
-          []
-        end
-      end, MsgTypes)
+      "end\n"
+      %"\n"
+      %lists:map(fun({Enum, _Descr}) ->
+      %  try
+      %    {Msg, _Type, Category, Fields} = get_msg_info(Enum, Messages),
+      %    [
+      %      "defmodule FIX.", atom_to_list(Msg), " do\n"
+      %      "  @moduledoc \"", iif(Category==admin, "Admin", "Application"),
+      %      " ", atom_to_list(Msg), " message\"\n"
+      %      "  defstruct [\n",
+      %      align_table(
+      %        [{"    "++atom_to_list(get_attr(name, A))++": ", "nil,\n"}
+      %          || {_Tag, A, _} <- Fields, get_attr(required, A) == true]
+      %      ),
+      %      "  ]\n"
+      %      "end\n\n"
+      %    ]
+      %  catch _:_ ->
+      %    []
+      %  end
+      %end, MsgTypes)
     ]);
   true ->
     ok
@@ -751,11 +751,11 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
     end,
     "\n"
     "-define(MAP_SET(_R, _F, _V), _R#fix{fields = (R#fix.fields)#{_F => _V}}).\n"
-    "-define(MSG_INIT(_MT), #fix{msgtype=_MT", iif(State#state.elixir, ", fields = #{'__struct__' => _MT}"),"}).\n"
+    "-define(MSG_INIT(_MT), #fix{msgtype=_MT}).\n"
     "\n"
     "field(N) -> ", add_variant_suffix("fix_fields", State), ":field(N).\n\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
-    "  case decode_msg_header(Msg, #fix{", iif(State#state.elixir, "header = #{'__struct__' => 'Elixir.FIX.Header'}"),"}, 0, []) of\n"
+    "  case decode_msg_header(Msg, #fix{}, 0, []) of\n"
     "    {#fix{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
     "      {#fix{} = M, I1, U} = decode_msg(MT, L),\n"
     "      {I1, M#fix{header=H}, U};\n"
@@ -769,12 +769,12 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
           false ->
             <<"">>;
           {Msg, _Type, _Cat, _Fields} ->
-            {lists:flatten("decode_msg("++sq(atom_name(Msg,State))), ", L)", " -> ",
+            {lists:flatten("decode_msg("++sq(atom_name(Msg,State,35))), ", L)", " -> ",
               "decode_msg_"++atom_to_list(Msg), "(L, ",
-              "?MSG_INIT("++lists:flatten(sq(atom_name(Msg,State)))++")", ", 0, []);\n"}
+              "?MSG_INIT("++sq(atom_name(Msg,State,35))++")", ", 0, []);\n"}
         end
       end, MsgTypes) ++
-      [{"decode_msg(_,", "_)", " -> ", "false", " ", " ", ".\n"}]
+      [{"decode_msg(_,", "_)", " -> ", "false.", " ", " ", "\n"}]
     ),
     "\n",
     lists:map(fun({Enum, _Descr}) ->
@@ -1259,7 +1259,6 @@ spad(S, I) when is_atom(S)    -> string:pad(atom_to_list(S), I);
 spad(S, I) when is_list(S)    -> string:pad(S, I);
 spad(S, I) when is_integer(S) -> string:pad(integer_to_list(S), I, leading).
 
-qpad (S, I) -> string:pad(q(S),  I).
 sqpad(S, I) -> string:pad(sq(S), I).
 
 dtype(undefined, _) -> "DataType::UNDEFINED";
@@ -1275,9 +1274,12 @@ dtype(string)  -> "DataType::STRING";
 dtype(binary)  -> "DataType::BINARY";
 dtype(datetm)  -> "DataType::DATETIME".
 
-atom_name(N, S)                     when is_atom(N) -> atom_name(atom_to_list(N), S);
-atom_name(N, #state{elixir = true}) when is_list(N) -> "Elixir." ++ N;
-atom_name(N, _)                     when is_list(N) -> N.
+atom_name(N, S, I)                     when is_atom(N) -> atom_name(atom_to_list(N), S, I);
+%atom_name(N, #state{elixir = true},35) when is_list(N) -> "Elixir.FIX." ++ N;
+atom_name(N, #state{elixir = true}, _) when is_list(N) -> "Elixir."     ++ N;
+atom_name(N, _, _)                     when is_list(N) -> N.
+
+atom_name(N,S) -> atom_name(N, S, undefined).
 
 undef(#state{elixir = true}) -> "nil";
 undef(_)                     -> "nil".

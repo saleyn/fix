@@ -731,7 +731,7 @@ make_error(const char* src, FixVariant* var, ErlNifEnv* env, const char* error,
 {
   if (var->is_elixir()) {
     /*
-    %{'__exception__' => true, '__struct__' => 'Elixir.FixError',
+    %{'__exception__' => true, '__struct__' => 'Elixir.FIX.FixError',
       message => <<"FIX parser error">>, tag => tag, pos => pos, reason => error}
     */
     char buf[128];
