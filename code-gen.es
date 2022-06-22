@@ -712,7 +712,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
       "  ]\n"
       "end\n\n",
       "defmodule FIX.ParserError do\n"
-      "  defexception [:tag, :pos, :reason, :message]\n\n"
+      "  defexception [:tag, :pos, :reason, :message, :bin, :src]\n\n"
       "  def message(e), do: e.message\n"
       "end\n\n",
       lists:map(fun({Enum, _Descr}) ->

@@ -64,8 +64,11 @@ decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
       {more, _Size} = R ->
         R
     end
-  catch error:Error:ST ->
-    erlang:raise(error, {"Failed to decode FIX msg", Error, Bin}, ST)
+  catch
+    error : #{'__exception__' := _} = E : ST ->
+      erlang:raise(error, E#{bin => Bin}, ST);
+    error:Error:ST ->
+      erlang:raise(error, {"Failed to decode FIX msg", Error, Bin}, ST)
   end.
 
 -spec dump(binary() | iolist()) -> binary().

@@ -72,6 +72,7 @@ static ERL_NIF_TERM am_message;
 static ERL_NIF_TERM am_more;
 static ERL_NIF_TERM am_pos;
 static ERL_NIF_TERM am_reason;
+static ERL_NIF_TERM am_src;
 static ERL_NIF_TERM am_struct;
 static ERL_NIF_TERM am_tag;
 static ERL_NIF_TERM am_nil;
@@ -717,8 +718,16 @@ inline std::string to_string(const char* fmt, Args&&... args) {
   return buf;
 }
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x)                    STRINGIFY(x)
+#define FILE_SRC_LOCATION __FILE__ ":" TOSTRING(__LINE__)
+
+#define MAKE_ERROR(Var, Env, Err, Pos, Tag) \
+  make_error(FILE_SRC_LOCATION, Var, Env, Err, Pos, Tag)
+
 inline ERL_NIF_TERM
-make_error(FixVariant* var, ErlNifEnv* env, const char* error, long pos, int tag)
+make_error(const char* src, FixVariant* var, ErlNifEnv* env, const char* error,
+           long pos, int tag)
 {
   if (var->is_elixir()) {
     /*
@@ -736,7 +745,8 @@ make_error(FixVariant* var, ErlNifEnv* env, const char* error, long pos, int tag
       am_message,
       am_tag,
       am_pos,
-      am_reason
+      am_reason,
+      am_src
     };
 
     auto reason = create_binary(env, buf, len);
@@ -747,7 +757,8 @@ make_error(FixVariant* var, ErlNifEnv* env, const char* error, long pos, int tag
       reason,
       enif_make_long(env, tag),
       enif_make_long(env, pos),
-      enif_make_atom(env, error)
+      enif_make_atom(env, error),
+      create_binary (env, basename(src))
     };
 
     if (reason != am_enomem) [[likely]] {
@@ -988,9 +999,9 @@ inline ERL_NIF_TERM
 Field::decode(ErlNifEnv* env, const char* code, int len, const Def& def)
 {
   if (!m_decf || len < 1 || len > m_max_val_len) [[unlikely]]
-    return am_nil;
+    return def();
 
-  assert(m_decf);
+  ASSERT(m_decf, code, code+len);
 
   auto res = m_decf(*this, env, code, len);
 
@@ -1201,6 +1212,7 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
   am_more      = make_atom("more");
   am_pos       = make_atom("pos");
   am_reason    = make_atom("reason");
+  am_src       = make_atom("src");
   am_struct    = make_atom("__struct__");
   am_tag       = make_atom("tag");
   am_nil       = make_atom("nil");
@@ -1456,7 +1468,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
     return enif_make_tuple2(env, am_more, enif_make_int(env, 25 - len));
 
   if (memcmp("8=FIX", begin, 5) != 0) [[unlikely]]
-    return make_error(fvar, env, "missing_tag", 0, 8);
+    return MAKE_ERROR(fvar, env, "missing_tag", 0, 8);
 
   char soh = 0;
 
@@ -1469,14 +1481,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   // Did we find the SOH?
   if (soh == 0) [[unlikely]]
-    return make_error(fvar, env, "missing_soh", 0, 8);
+    return MAKE_ERROR(fvar, env, "missing_soh", 0, 8);
 
   // Find FIX length (tag9) in prefix: "8=FIX.M.N|9=LLLL|"...
   const char s_prefix[] = {soh, '9', '='};
   auto f9 = (const unsigned char*)memmem(begin+5, len, s_prefix, sizeof(s_prefix));
 
   if (!f9) [[unlikely]]
-    return make_error(fvar, env, "missing_tag", 0, 9);
+    return MAKE_ERROR(fvar, env, "missing_tag", 0, 9);
 
   f9 += 3; // Adjust for <<1,"9=">>
 
@@ -1484,7 +1496,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   auto body = str_to_int(f9, end, msg_len, soh);
   if (body == nullptr)
-    return make_error(fvar, env, "invalid_tag", 0, 9);
+    return MAKE_ERROR(fvar, env, "invalid_tag", 0, 9);
 
   auto end_len = msg_len + 1+7; //  SOH + "10=XXX" + SOH
   auto msg_end = body + end_len;
@@ -1496,12 +1508,12 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   static const char s_checksum[] = {'1', '0', '='};
   if (memcmp(pcsum, s_checksum, sizeof(s_checksum)) != 0) [[unlikely]]
-    return make_error(fvar, env, "invalid_msg_length", msg_len, 9);
+    return MAKE_ERROR(fvar, env, "invalid_msg_length", msg_len, 9);
 
   msg_len = msg_end - begin;  // Complete length of current FIX message
 
   if (*(msg_end-1) != soh) [[unlikely]]
-    return make_error(fvar, env, "invalid_msg_terminator", msg_len, 0);
+    return MAKE_ERROR(fvar, env, "invalid_msg_terminator", msg_len, 0);
 
   DBGPRINT(fvar->debug(), 1, "FIX(%s): got message of size %d",
     fvar->variant().c_str(), msg_len);
@@ -1548,7 +1560,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         code = 0;
         p    = str_to_int(ptr, end, code, '=');
         if (!p)
-          return make_error(fvar, env, "code", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "code", ptr - begin, code);
 
         field = (code > 0 && code < fvar->field_count())
               ? fvar->field(code) : fvar->field(0);
@@ -1566,7 +1578,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           reply.reset((ERL_NIF_TERM*)realloc(reply.release(), size));
 
           if (!reply)
-            return make_error(fvar, env, "code_out_of_memory", ptr - begin, code);
+            return MAKE_ERROR(fvar, env, "code_out_of_memory", ptr - begin, code);
         }
 
         tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
@@ -1591,7 +1603,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         long ival=0;
         p = str_to_int(ptr, end, ival, soh);
         if (p == nullptr)
-          return make_error(fvar, env, "int", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "int", ptr - begin, code);
 
         ASSERT(field, begin, end);
 
@@ -1606,8 +1618,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
               ? field->decode(env, (const char*)ptr, p-ptr, def)
               : enif_make_long(env, ival);
 
-        if (value == am_nil) [[unlikely]]
-          value = enif_make_long(env, ival);
+        ASSERT(value != am_nil, begin, end);
 
         break;
       }
@@ -1619,7 +1630,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
           n = n*10 + (*p - '0');
 
         if (p == end || (*p != '.' && *p != soh)) [[unlikely]]
-          return make_error(fvar, env, "double_soh", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "double_soh", ptr - begin, code);
 
         long   tmp  = i;
         double mant = n, frac = 0, coeff = 1.0;
@@ -1633,14 +1644,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         }
 
         if (p == end || *p != soh) [[unlikely]]
-          return make_error(fvar, env, "double_soh", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "double_soh", ptr - begin, code);
 
         if (double_fmt == DoubleFmt::Binary || i > 19) {
           auto sz   = p - ptr;
           auto data = enif_make_new_binary(env, sz, &value);
 
           if (!data) [[unlikely]]
-            return make_error(fvar, env, "binary_alloc", ptr - begin, code);
+            return MAKE_ERROR(fvar, env, "binary_alloc", ptr - begin, code);
           memcpy(data, ptr, sz);
           break;
         }
@@ -1660,7 +1671,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         int ival=0;
         p = str_to_int(ptr, end, ival, soh); // Get the number of repeating groups
         if (p == nullptr)
-          return make_error(fvar, env, "group", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "group", ptr - begin, code);
 
         value = enif_make_long(env, ival);
         break;
@@ -1677,14 +1688,14 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         }
 
         if (p >= end || *p != soh)
-          return make_error(fvar, env, "binary", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "binary", ptr - begin, code);
 
         const auto len = p - ptr;
 
         if (ret_binary) {
           auto data = enif_make_new_binary(env, len, &value);
           if (!data)
-            return make_error(fvar, env, "binary_alloc", ptr - begin, code);
+            return MAKE_ERROR(fvar, env, "binary_alloc", ptr - begin, code);
           memcpy(data, ptr, len);
         } else {
           value = enif_make_tuple2(env,
@@ -1704,21 +1715,23 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         }
 
         if (*p != soh || p >= end)
-          return make_error(fvar, env, "string", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "string", ptr - begin, code);
 
         ASSERT(field, begin, end);
 
         auto def = [=]() {
-          return  ret_binary
-                ? create_binary(env, p, p-ptr)
-                : enif_make_tuple2(env, enif_make_uint(env, ptr-begin),
-                                   enif_make_uint(env, p-ptr));
+          return ret_binary ? create_binary(env, p, p-ptr)
+                            : enif_make_tuple2(env,
+                                enif_make_uint(env, ptr-begin),
+                                enif_make_uint(env, p-ptr));
         };
 
-        value = field->has_values() ? field->decode(env, (const char*)ptr, p-ptr, def)
-                                    : am_nil;
+        value = field->has_values()
+              ? field->decode(env, (const char*)ptr, p-ptr, def)
+              : def();
+
         if (value == am_nil) [[unlikely]]
-          return make_error(fvar, env, "string_alloc_binary", ptr-begin, code);
+          return MAKE_ERROR(fvar, env, "string_alloc_binary", ptr-begin, code);
 
         break;
       }
@@ -1727,13 +1740,13 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
         while (p < end && *p != soh) ++p;
 
         if (*p != soh)
-          return make_error(fvar, env, "datetime", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "datetime", ptr - begin, code);
 
         auto len = p - ptr;
         auto ts  = decode_timestamp(env, reinterpret_cast<const char*>(ptr), len);
 
         if (ts < 0) [[unlikely]]
-          return make_error(fvar, env, "datetime", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "datetime", ptr - begin, code);
 
         value = enif_make_int64(env, ts);
         break;
@@ -1742,31 +1755,31 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
       case ParserState::BOOL: {
         value = (*ptr == 'Y' || *ptr == 'y') ? am_true : am_false;
         if (++p == end || *p != soh)
-          return make_error(fvar, env, "boolean_soh", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "boolean_soh", ptr - begin, code);
 
         break;
       }
 
       case ParserState::CHAR: {
         if (++p == end || *p != soh)
-          return make_error(fvar, env, "char_soh", ptr - begin, code);
+          return MAKE_ERROR(fvar, env, "char_soh", ptr - begin, code);
 
         auto def = [=]() { return enif_make_int(env, int(*ptr)); };
 
         value = field->has_values()
               ? field->decode(env, (const char*)ptr, p-ptr, def)
-              : enif_make_int(env, (int)*ptr);
+              : def();
         break;
       }
       default:
-        return make_error(fvar, env, "unsupported_data_type", ptr - begin, code);
+        return MAKE_ERROR(fvar, env, "unsupported_data_type", ptr - begin, code);
     }
 
     if (p >= end) [[unlikely]]
-      return make_error(fvar, env, "read_beyond_buffer_len", ptr - begin, code);
+      return MAKE_ERROR(fvar, env, "read_beyond_buffer_len", ptr - begin, code);
 
     if (*p != soh) [[unlikely]]
-      return make_error(fvar, env, "missing_soh", ptr - begin, code);
+      return MAKE_ERROR(fvar, env, "missing_soh", ptr - begin, code);
 
     state   = ParserState::CODE;
     val_end = p++;  // Skip SOH
@@ -1776,7 +1789,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
     // Append the value to the result array
     if (!append(tag, code, value)) [[unlikely]]
-      return make_error(fvar, env, "out_of_memory", ptr-begin, code);
+      return MAKE_ERROR(fvar, env, "out_of_memory", ptr-begin, code);
   }
 
   begin = ptr;
@@ -1784,5 +1797,5 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
   auto res = enif_make_list_from_array(env, (ERL_NIF_TERM*)reply.get(), reply_size);
   return res
        ? enif_make_tuple3(env, am_ok, enif_make_int(env, msg_len), res)
-       : make_error(fvar, env, "error_in_make_list_from_array", ptr-begin, code);
+       : MAKE_ERROR(fvar, env, "error_in_make_list_from_array", ptr-begin, code);
 }
