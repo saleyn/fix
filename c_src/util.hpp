@@ -22,9 +22,13 @@
 #define IS_LIKELY(Expr)   __builtin_expect(!!(Expr), 1)
 #define IS_UNLIKELY(Expr) __builtin_expect(!!(Expr), 0)
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x)                    STRINGIFY(x)
+#define FILE_SRC_LOCATION __FILE__ ":" TOSTRING(__LINE__)
+
 #define PRINT(Fmt, ...)                                   \
-  fprintf(stderr, Fmt " [%s:%d]\r\n", __VA_ARGS__,        \
-          basename(__FILE__), __LINE__)
+  fprintf(stderr, Fmt " [%s]\r\n", __VA_ARGS__,           \
+          basename(FILE_SRC_LOCATION))
 
 #define DBGPRINT(Debug, Level, Fmt, ...)                  \
   do {                                                    \
@@ -38,8 +42,8 @@
     std::ofstream out("/tmp/dump.bin");                   \
     out << std::string((const char*)Begin, End-Begin);    \
     out.close();                                          \
-    fprintf(stderr, "Asserting failed [%s:%d]\r\n",       \
-            basename(__FILE__), __LINE__);                \
+    fprintf(stderr, "Asserting failed [%s]\r\n",          \
+            basename(FILE_SRC_LOCATION);                  \
     assert(Cond);                                         \
   } else {}
 #else
@@ -718,15 +722,12 @@ inline std::string to_string(const char* fmt, Args&&... args) {
   return buf;
 }
 
-#define STRINGIFY(x) #x
-#define TOSTRING(x)                    STRINGIFY(x)
-#define FILE_SRC_LOCATION __FILE__ ":" TOSTRING(__LINE__)
-
 #define MAKE_ERROR(Var, Env, Err, Pos, Tag) \
   make_error(FILE_SRC_LOCATION, Var, Env, Err, Pos, Tag)
 
-inline ERL_NIF_TERM
-make_error(const char* src, FixVariant* var, ErlNifEnv* env, const char* error,
+template <int N>
+ERL_NIF_TERM
+make_error(const char (&src)[N], FixVariant* var, ErlNifEnv* env, const char* error,
            long pos, int tag)
 {
   if (var->is_elixir()) {

@@ -508,8 +508,10 @@ decode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 static ERL_NIF_TERM
 encode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
-  auto utc  = true;
-  uint64_t t;
+  auto utc = true;
+  ErlNifUInt64  t;
+
+  static_assert(sizeof(t) == sizeof(uint64_t));
 
   auto pers = get_pers(env);
   if (!pers) [[unlikely]]
