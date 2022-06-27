@@ -43,7 +43,7 @@
     out << std::string((const char*)Begin, End-Begin);    \
     out.close();                                          \
     fprintf(stderr, "Asserting failed [%s]\r\n",          \
-            basename(FILE_SRC_LOCATION);                  \
+            basename(FILE_SRC_LOCATION));                 \
     assert(Cond);                                         \
   } else {}
 #else
