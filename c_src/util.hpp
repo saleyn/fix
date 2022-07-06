@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cassert>
 #include <string>
+#include <vector>
 #include <filesystem>
 #ifndef NDEBUG
 #include <fstream>
