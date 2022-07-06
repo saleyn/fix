@@ -874,8 +874,6 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
   %%         / sets:from_list()
   %%         / sets:to_list(),
 
-  MaxMsgLen =
-    lists:max([length(atom_to_list(M)) || {M,_T,_C,_FF} <- AllMsgs]),
   MaxReqFldLen =
     lists:max([length(atom_to_list(get_name(F))) || {_M,_T,_C,FF} <- AllMsgs, {req, R} <- FF, F <- R]),
   MaxNLen =
@@ -919,25 +917,29 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
     %%   ]
     %% end, Groups),
     %% "is_grp_field(_, ", string:pad("_", MaxIDLen*2-2), ") -> false.\n\n",
-    lists:map(fun({Msg, G, _FF}) ->
-      GA = sqpad(G, MaxNLen+2),
-      %%GN = spad(group_name(G),  MaxGrpLen),
-      MN = sqpad(Msg, MaxMsgLen),
-      ["decode_group(", MN, ", ", GA, ", L) -> decode_", atom_to_list(Msg), "_", atom_to_list(group_name(G)), "(L, ", undef(State), ", #group{name=", sq(G), "});\n"]
-    end, AllGrps),
-    "decode_group(_, _, _) -> false.\n\n",
+    align_table(
+      lists:map(fun({Msg, G, _FF}) ->
+        {"decode_group(" ++ sq(atom_name(Msg,State)) ++ ",",
+          sq(atom_name(G,State))++",",
+          "L) -> decode_" ++ atom_to_list(Msg) ++ "_" ++ atom_to_list(group_name(G)),
+          "(L, " ++ undef(State) ++ ", #group{name=" ++ sq(atom_name(G,State))++"});\n"}
+      end, AllGrps) ++
+      [{"decode_group(_,", "_,", "_) -> false.\n", ""}]),
+    "\n",
     lists:map(fun({Msg, G, FF}) ->
       GN = atom_to_list(group_name(G)),
       FN = atom_to_list(Msg) ++ "_" ++ GN,
-      ML = lists:max([length(atom_to_list(F)) || {F, _ID, _Req, _IsGrp} <- FF])+2,
       [
         "%% Parse Group: ", GN, " in message ", atom_to_list(Msg), "\n",
-        "decode_",  FN, "(L, R) -> decode_", FN, "(L, ", undef(State), ", R).\n",
-        "decode_",  FN, "([{", spad("Delim",ML+2), ",_,_,_}|_]=L, Delim, R) -> {L, R};\n",
-        [[
-          "decode_",  FN, "([{", spad(sq(F)++"=H", ML+2), ",V,_,_}|T], Delim, #group{fields=F} = R) ->"
-          " decode_", FN, "(T, def(Delim,H), R#group{fields = F#{", sqpad(F,ML), " => V}});\n"
-          ] || {F, _ID, _Req, _IsGrp} <- FF],
+        "decode_", FN, "(L, R) -> decode_", FN, "(L, ", undef(State), ", R).\n",
+        "decode_", FN, "([{Delim,_,_,_}|_]=L, Delim, R) -> {L, R};\n",
+        align_table([
+          {
+            "decode_"++FN++"([{"++sq(atom_name(F,State)),
+            "=H,V,_,_}|T], Delim, #group{fields=F} = R) ->\n  "
+            "decode_"++FN++"(T, def(Delim,H), R#group{fields = F#{"++sq(atom_name(F,State)),
+            " => V}});\n"}
+          || {F, _ID, _Req, _IsGrp} <- FF]),
         "decode_", FN, "(L, _Delim, R) -> {L, R}.\n\n"
       ]
     end, AllGrps),
