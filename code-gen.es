@@ -505,7 +505,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "field(id) ->\n"
     "  fix_nif:field_meta(?FIX_VARIANT, id).\n\n"
     "%% @see decode/3.\n"
-    "decode(Bin)          -> decode(Bin, [binary]).\n\n"
+    "decode(Bin)          -> decode(Bin, [binary, {float, decimal}]).\n\n"
     "%% @see decode/3.\n"
     "decode(Bin, Options) -> decode(nif, Bin, Options).\n\n"
     "%% @doc Parse the first FIX message in the Bin.\n"
