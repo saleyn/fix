@@ -799,10 +799,9 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
           lists:map(fun({GrpOrFld, FName}) ->
             IsGrp = GrpOrFld==group,
             GN    = atom_to_list(iif(IsGrp, group_name(FName), FName)),
-            QGN   = iif(IsGrp, GN, sq(GN)),
             {Var, Val, Res, Add} =
               case GrpOrFld of
-                group -> {"L", "N", "G", [" {G,L} = forgrp(",QGN,", N, T, fun ",add_variant_suffix("fix_groups",State),":decode_", MsgName, "_", GN, "/2),"]};
+                group -> {"L", "N", "G", [" {G,L} = forgrp(N, T, fun ",add_variant_suffix("fix_groups",State),":decode_", MsgName, "_", GN, "/2),"]};
                 field -> {"T", "V", "V", []}
               end,
             [
@@ -825,13 +824,9 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
       end
     end, [{header, ""} | MsgTypes]),
     "\n"
-    "forgrp(GN,N, L, F) ->\n"
-    "  Init = #group{name = GN, fields = #{}},\n"
-    "  forgrp(1, N, F, Init, F(L, Init), []).\n"
-    "forgrp(I, I,_F,_Init, {L,R}, Acc) ->\n"
-    "  {lists:reverse([R|Acc]), L};\n"
-    "forgrp(I, N, F, Init, {L,R}, Acc) ->\n"
-    "  forgrp(I+1, N, F, Init, F(L, Init), [R|Acc]).\n"
+    "forgrp(N, L, F)                   -> forgrp(1, N, F, #{}, F(L, #{}), []).\n"
+    "forgrp(I, I,_F,_Init, {L,R}, Acc) -> {lists:reverse([R|Acc]), L};\n"
+    "forgrp(I, N, F, Init, {L,R}, Acc) -> forgrp(I+1, N, F, Init, F(L, Init), [R|Acc]).\n"
   ]).
 
 generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sfx=SFX} = State) ->
@@ -922,7 +917,7 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
         {"decode_group(" ++ sq(atom_name(Msg,State)) ++ ",",
           sq(atom_name(G,State))++",",
           "L) -> decode_" ++ atom_to_list(Msg) ++ "_" ++ atom_to_list(group_name(G)),
-          "(L, " ++ undef(State) ++ ", #group{name=" ++ sq(atom_name(G,State))++"});\n"}
+          "(L, " ++ undef(State) ++ ", #{});\n"}
       end, AllGrps) ++
       [{"decode_group(_,", "_,", "_) -> false.\n", ""}]),
     "\n",
@@ -931,16 +926,16 @@ generate_messages(Header, Messages, AllGrps, FldMap, #state{config = Cfg, var_sf
       FN = atom_to_list(Msg) ++ "_" ++ GN,
       [
         "%% Parse Group: ", GN, " in message ", atom_to_list(Msg), "\n",
-        "decode_", FN, "(L, R) -> decode_", FN, "(L, ", undef(State), ", R).\n",
-        "decode_", FN, "([{Delim,_,_,_}|_]=L, Delim, R) -> {L, R};\n",
+        "decode_", FN, "(L, F) -> decode_", FN, "(L, ", undef(State), ", F).\n",
+        "decode_", FN, "([{Delim,_,_,_}|_]=L, Delim, F) -> {L, F};\n",
         align_table([
           {
             "decode_"++FN++"([{"++sq(atom_name(F,State)),
-            "=H,V,_,_}|T], Delim, #group{fields=F} = R) ->\n  "
-            "decode_"++FN++"(T, def(Delim,H), R#group{fields = F#{"++sq(atom_name(F,State)),
-            " => V}});\n"}
+            "=H,V,_,_}|T], Delim, F) ->\n  "
+            "decode_"++FN++"(T, def(Delim,H), F#{"++sq(atom_name(F,State)),
+            " => V});\n"}
           || {F, _ID, _Req, _IsGrp} <- FF]),
-        "decode_", FN, "(L, _Delim, R) -> {L, R}.\n\n"
+        "decode_", FN, "(L, _Delim, F) -> {L, F}.\n\n"
       ]
     end, AllGrps),
     "\n"
@@ -1127,14 +1122,11 @@ group_name(A) when is_list(A), is_tuple(hd(A)) ->
 group_name(A) when is_tuple(A) ->
   group_name(element(1, A));
 group_name(N) when is_atom(N) ->
-  case atom_to_list(N) of
-    "No" ++ Name -> list_to_atom("grp"++Name);
-    Name         -> list_to_atom("grp"++Name)
-  end;
+  group_name(atom_to_list(N));
 group_name("No"++Rest) ->
-  list_to_atom("grp"++Rest);
+  list_to_atom(Rest);
 group_name(Name) when is_list(Name) ->
-  list_to_atom("grp"++Name).
+  list_to_atom(Name).
 
 -spec get_all_groups(list(), fun((atom()) -> integer()), list()) ->
         [{Msg::atom(),
