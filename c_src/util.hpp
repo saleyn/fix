@@ -31,11 +31,15 @@
   fprintf(stderr, Fmt " [%s]\r\n", __VA_ARGS__,           \
           basename(FILE_SRC_LOCATION))
 
+#ifndef NDEBUG
 #define DBGPRINT(Debug, Level, Fmt, ...)                  \
   do {                                                    \
     if (Debug >= Level) [[unlikely]]                      \
       PRINT(Fmt, __VA_ARGS__);                            \
   } while(0)
+#else
+#define DBGPRINT(Debug, Level, Fmt, ...)
+#endif
 
 #ifndef NDEBUG
 #define ASSERT(Cond, Begin, End)                          \
@@ -1170,7 +1174,7 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
         auto pp = mant - mm*pow;
         bval.size = prec==0
                   ? snprintf((char*)tmp, sizeof(tmp), "%ld", mant)
-                  : snprintf((char*)tmp, sizeof(tmp), "%ld.%*ld", mm, prec, pp);
+                  : snprintf((char*)tmp, sizeof(tmp), "%ld.%0*ld", mm, prec, pp);
         bval.data = tmp;
       }
       else if (!enif_inspect_binary(env, val, &bval))

@@ -889,7 +889,7 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     goto ERR;
   } else if (debug > 0) {
     for (auto& f : so_files)
-      DBGPRINT(debug, 1, "FIX: file %s", f.c_str());
+      PRINT("FIX: file %s", f.c_str());
   }
 
   return init_env(priv_data, so_files, debug, ts_type);
