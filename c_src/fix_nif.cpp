@@ -25,7 +25,6 @@
 
 #include "util.hpp"
 
-static ERL_NIF_TERM am_badarg;
 static ERL_NIF_TERM am_badenv;
 static ERL_NIF_TERM am_badvariant;
 static ERL_NIF_TERM am_binary;
@@ -237,54 +236,7 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 }
 
 static ERL_NIF_TERM
-encode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
-{
-  auto pers = get_pers(env);
-  if (!pers) [[unlikely]]
-    return enif_raise_exception(env, am_badenv);
-
-  FixVariant* var;
-
-  if (argc != 3 || !pers->get(argv[0], var)) [[unlikely]]
-    return enif_make_badarg(env);
-
-  auto tag = argv[1];
-  auto val = argv[2];
-  long n;
-  char sbuf[128];
-
-  auto [field, numtag] = var->field_with_tag(env, tag);
-  if (!field)
-    return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
-
-  if (enif_is_atom(env, val)) {
-    if (!field->has_values()) [[unlikely]]
-      return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
-    return field->encode(env, val); // This creates a copy of the cached binary
-  } else if (enif_is_binary(env, val)) {
-    return val;
-  } else if (enif_get_long(env, val, &n)) {
-    ERL_NIF_TERM bin;
-    char buf[32];
-    int  len = (field->dtype() == DataType::DATETIME)
-             ? encode_timestamp(buf, n, pers->ts_type())
-             : snprintf(buf, sizeof(buf), "%ld", n);
-    if (len == 0) [[unlikely]]
-      return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
-    auto p   = (char*)enif_make_new_binary(env, len, &bin);
-    if (!p) [[unlikely]]
-      return enif_raise_exception(env, am_enomem);
-    memcpy(p, buf, len);
-    return bin;
-  } else if (enif_get_string(env, val, sbuf, sizeof(sbuf), ERL_NIF_LATIN1)) {
-    return val;
-  }
-
-  return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
-}
-
-static ERL_NIF_TERM
-encode_field_tagvalue_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+encode_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
   auto pers = get_pers(env);
   if (!pers) [[unlikely]]
@@ -298,20 +250,17 @@ encode_field_tagvalue_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   auto tag = argv[1];
   auto val = argv[2];
 
-  auto [field, numtag] = var->field_with_tag(env, tag);
+  auto field = var->field(env, tag);
   if (!field)
     return enif_make_badarg(env);
 
   int offset = 0;
   ErlNifBinary output{};
   auto guard = binary_guard(output);
+  auto res   = field->encode(env, offset, output, val);
 
-  auto res = field->encode_with_tag(env, offset, output, numtag, val);
-
-  if  (res != am_ok) [[unlikely]]
-    return res == am_error
-         ? enif_raise_exception(env, enif_make_tuple2(env, res, tag))
-         : enif_raise_exception(env, res);
+  if  (res  != am_ok) [[unlikely]]
+    return res;
 
   if (offset < int(output.size) && !enif_realloc_binary(&output, offset))
     return enif_raise_exception(env, am_enomem);
@@ -361,7 +310,7 @@ encode_fields_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!field)
       return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
 
-    auto res = field->encode_with_tag(env, offset, output, numtag, val);
+    auto res = field->encode(env, offset, output, val);
     if  (res != am_ok) [[unlikely]]
       return res == am_error
            ? enif_raise_exception(env, enif_make_tuple2(env, res, tag))
@@ -822,7 +771,6 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
   }
 
   try {
-    am_badarg     = safe_make_atom(env, "badarg");
     am_badenv     = safe_make_atom(env, "badenv");
     am_badvariant = safe_make_atom(env, "badvariant");
     am_binary     = safe_make_atom(env, "binary");
@@ -930,8 +878,7 @@ static ErlNifFunc fix_nif_funcs[] =
   {"tag_to_field",          2, tag_to_field_nif},
   {"field_to_tag",          2, field_to_tag_nif},
   {"decode_field_value",    3, decode_field_value_nif},
-  {"encode_field_value",    3, encode_field_value_nif},
-  {"encode_field_tagvalue", 3, encode_field_tagvalue_nif},
+  {"encode_field",          3, encode_field_nif},
   {"encode_fields",         2, encode_fields_nif},
   {"list_field_values",     2, list_field_values_nif},
   {"list_fix_variants",     0, list_fix_variants_nif},

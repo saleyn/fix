@@ -69,6 +69,7 @@
 //------------------------------------------------------------------------------
 // Static variables
 //------------------------------------------------------------------------------
+static ERL_NIF_TERM am_badarg;
 static ERL_NIF_TERM am_decimal;
 static ERL_NIF_TERM am_enomem;
 static ERL_NIF_TERM am_exception;
@@ -247,6 +248,9 @@ private:
   char buf[128];
 };
 
+/// Convert a `term` that can be an atom/integer/binary to a string field name
+std::string term_to_field_name(ErlNifEnv*, ERL_NIF_TERM term);
+
 //------------------------------------------------------------------------------
 // Field
 //------------------------------------------------------------------------------
@@ -281,6 +285,7 @@ struct Field {
   int                     debug()           const;
 
   int                     id()              const { return m_id;           }
+  std::string const&      id_str()          const { return m_id_str;       }
   std::string_view const& name_str()        const { return m_name;         }
   const char*             name()            const { return m_name.data();  }
   FieldType               type()            const { return m_type;         }
@@ -304,8 +309,10 @@ struct Field {
   ERL_NIF_TERM            value_atom(unsigned idx) const;
   ERL_NIF_TERM            value_atom(std::string_view const& val) const;
 
-  FixVariant const* variant()     const { assert(m_var); return m_var; }
-  Persistent const* pers()        const;
+  bool                    is_elixir()   const;
+
+  FixVariant const*       variant()     const { assert(m_var); return m_var; }
+  Persistent const*       pers()        const;
 
   std::vector<FieldChoice> const& values() const { return m_choices; }
 
@@ -318,22 +325,17 @@ struct Field {
     return decode(env, code, len, def);
   }
 
-
-  // Find a value of the field as a term in the map identified by the atom value
-  // and return a copy suitable for returning from a NIF.
-  ERL_NIF_TERM encode(ErlNifEnv* env, ERL_NIF_TERM val);
-
-  // Find a value of the field as a term in the map identified by the atom value
-  // or if the val is binary take as is, and create a binary
-  // `<<Tag/binary, 1, Value/binary, 1>>`
-  ERL_NIF_TERM encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
-                               ERL_NIF_TERM tag, ERL_NIF_TERM val);
+  // Encode a value `val` of this field as binary stored in res as
+  // `<<Tag/binary, 1, Value/binary, 1>>`. Return am_ok if all good or Erlang
+  // exception on error.
+  ERL_NIF_TERM encode(ErlNifEnv*, int& offset, ErlNifBinary& res, ERL_NIF_TERM val);
 private:
   using TermMap = std::unordered_map<ERL_NIF_TERM, ERL_NIF_TERM>;
   using NameMap = std::unordered_map<std::string_view, const FieldChoice*>;
 
   FixVariant*                m_var;
   int                        m_id;
+  std::string                m_id_str;
   std::string_view           m_name;
   FieldType                  m_type;
   DataType                   m_dtype;
@@ -416,8 +418,8 @@ struct FixVariant {
   ErlNifEnv const*    env()       const { return m_pers->env();   }
   ERL_NIF_TERM        null()            { return ERL_NIF_TERM(0); }
 
-  Field const*        field(unsigned idx) const;
-  Field*              field(unsigned idx);
+  Field const*        field(unsigned tag) const;
+  Field*              field(unsigned tag);
 
   Field const*        field(ErlNifEnv*, ERL_NIF_TERM tag) const;
   Field*              field(ErlNifEnv*, ERL_NIF_TERM tag);
@@ -426,8 +428,8 @@ struct FixVariant {
   // value. Note that the binary is for internal use within the NIF
   // driver, and if returned back to Erlang, need to be wrapped by
   // a enif_make_copy() call!
-  FieldAndTagConst    field_with_tag(unsigned idx) const;
-  FieldAndTag         field_with_tag(unsigned idx);
+  FieldAndTagConst    field_with_tag(unsigned tag) const;
+  FieldAndTag         field_with_tag(unsigned tag);
 
   // This function returns a pointer to a Field, and a binary tag
   // value. Note that the binary is for internal use within the NIF
@@ -680,6 +682,23 @@ encode_timestamp(ErlNifEnv* env, uint64_t usecs, TsType tt=TsType::Seconds,
   return ret;
 }
 
+inline std::string term_to_field_name(ErlNifEnv* env, ERL_NIF_TERM term)
+{
+  char buf[128];
+  if (enif_get_atom(env, term, buf, sizeof(buf), ERL_NIF_LATIN1) == 0)
+    return std::string(buf);
+
+  long lname;
+  if (enif_get_long(env, term, &lname) == 0)
+    return std::to_string(lname);
+
+  ErlNifBinary bname;
+  if (enif_inspect_binary(env, term, &bname) == 0)
+    return std::string((const char*)bname.data, bname.size);
+
+  return std::string();
+}
+
 struct ErlMapIterator {
   ErlMapIterator() : m_iter{}, m_initialized(false) {}
   ErlMapIterator(ErlNifEnv *env, ERL_NIF_TERM map) { init(env, map); }
@@ -760,8 +779,8 @@ inline std::string to_string(const char* fmt, Args&&... args) {
 
 #define MAKE_DECODE_ERROR(Var, Env, Err, Pos, Tag) \
   make_decode_error(FILE_SRC_LOCATION, Var, Env, Err, Pos, Tag)
-#define MAKE_ENCODE_ERROR(Var, Env, Tag, BinTag, Err) \
-  make_encode_error(FILE_SRC_LOCATION, Var, Env, Tag, BinTag, Err)
+#define MAKE_ENCODE_ERROR(Fld, Env, ...) \
+  make_encode_error(FILE_SRC_LOCATION, Fld, Env, __VA_ARGS__)
 
 template <int N>
 ERL_NIF_TERM
@@ -819,24 +838,29 @@ make_decode_error(
           enif_make_long(env, pos)));
 }
 
-template <int N>
-ERL_NIF_TERM
-make_encode_error(
-  const char (&src)[N], FixVariant const* var,  ErlNifEnv*  env,
-  ERL_NIF_TERM tag,   ErlNifBinary const& btag, const char* error)
+template <int N, typename... Args>
+ERL_NIF_TERM make_encode_error
+(
+  const char (&src)[N], Field const* fld, ErlNifEnv* env,
+  const char* err, Args&&... args
+)
 {
-  if (var->is_elixir()) {
+  char buf[256];
+  auto len = snprintf(buf, sizeof(buf),
+                      "Cannot encode FIX field '%s': ", fld->name());
+  len += snprintf(buf+len, sizeof(buf)-len, err, std::forward<Args>(args)...);
+
+  auto reason = create_binary(env, buf, len);
+
+  if (reason == am_enomem) [[unlikely]]
+    return enif_raise_exception(env, reason);
+
+  if (fld->is_elixir()) {
     /*
     %{'__exception__' => true, '__struct__' => 'Elixir.FIX.EncodeError',
       message => <<"FIX parser error">>, tag => tag, pos => pos, reason => error,
       src => <<"file:line">>}
     */
-    std::string stag((const char*)btag.data, btag.size);
-    char buf[128];
-    auto len =
-      snprintf(buf, sizeof(buf),
-                "Cannot encode FIX field (tag=%s): %s", stag.c_str(), error);
-
     ERL_NIF_TERM keys[] = {
       am_exception,
       am_struct,
@@ -845,29 +869,24 @@ make_encode_error(
       am_src
     };
 
-    auto reason = create_binary(env, buf, len);
-
     ERL_NIF_TERM values[] = {
       am_true,
       am_encode_error,
-      tag,
+      fld->get_atom(),
       reason,
-      create_binary (env, basename(src))
+      create_binary(env, basename(src))
     };
 
-    if (reason != am_enomem) [[likely]] {
-      ERL_NIF_TERM map;
+    ERL_NIF_TERM map;
 
-      if (enif_make_map_from_arrays(env, keys, values,
-                                    std::extent<decltype(keys)>::value, &map))
-        return enif_raise_exception(env, map);
-    }
+    if (enif_make_map_from_arrays(env, keys, values,
+                                  std::extent<decltype(keys)>::value, &map))
+      return enif_raise_exception(env, map);
     // Follow through with the general return
   }
 
   return enif_raise_exception(env,
-          enif_make_tuple3(env,
-            am_fix, enif_make_int(env, tag), create_binary(env, error)));
+          enif_make_tuple3(env, am_fix, fld->get_atom(), reason));
 }
 
 inline ERL_NIF_TERM safe_make_atom(ErlNifEnv* env, const char* am)
@@ -919,6 +938,7 @@ Field::Field
 )
   : m_var         (var)
   , m_id          (id)
+  , m_id_str      (std::to_string(id))
   , m_name        (name)
   , m_type        (type)
   , m_dtype       (dtype)
@@ -946,6 +966,7 @@ Field::Field
 inline Field::Field(Field const& a_rhs)
   : m_var         (a_rhs.m_var)
   , m_id          (a_rhs.m_id)
+  , m_id_str      (a_rhs.m_id_str)
   , m_name        (a_rhs.m_name)
   , m_type        (a_rhs.m_type)
   , m_dtype       (a_rhs.m_dtype)
@@ -964,6 +985,7 @@ inline Field::Field(Field const& a_rhs)
 inline Field::Field(Field&& a_rhs)
   : m_var         (a_rhs.m_var)
   , m_id          (a_rhs.m_id)
+  , m_id_str      (std::move(a_rhs.m_id_str))
   , m_name        (a_rhs.m_name)
   , m_type        (a_rhs.m_type)
   , m_dtype       (a_rhs.m_dtype)
@@ -983,6 +1005,7 @@ inline void Field::operator=(Field&& a_rhs)
 {
   m_var          = a_rhs.m_var;
   m_id           = a_rhs.m_id;
+  m_id_str       = std::move(a_rhs.m_id_str);
   m_name         = a_rhs.m_name;
   m_type         = a_rhs.m_type;
   m_dtype        = a_rhs.m_dtype;
@@ -1002,6 +1025,7 @@ inline void Field::operator=(Field const& a_rhs)
 {
   m_var          = a_rhs.m_var;
   m_id           = a_rhs.m_id;
+  m_id_str       = a_rhs.m_id_str;
   m_name         = a_rhs.m_name;
   m_type         = a_rhs.m_type;
   m_dtype        = a_rhs.m_dtype;
@@ -1018,13 +1042,16 @@ inline void Field::operator=(Field const& a_rhs)
 }
 
 inline int
-Field::debug() const { return m_var->debug(); }
+Field::debug()      const { return m_var->debug(); }
 
-inline Persistent const*
-Field::pers()  const { assert(m_var); return m_var->pers(); }
+inline Persistent   const*
+Field::pers()       const { assert(m_var); return m_var->pers(); }
+
+inline bool
+Field::is_elixir()  const { return variant()->is_elixir(); }
 
 inline ERL_NIF_TERM
-Field::get_atom() const
+Field::get_atom()   const
 {
   if (m_atom == 0) [[unlikely]]
     m_atom = enif_make_atom(m_var->env(), m_name.data());
@@ -1100,35 +1127,20 @@ Field::decode(ErlNifEnv* env, const char* code, int len, const Def& def)
   return IS_LIKELY(res != 0) ? res : def();
 }
 
-// Find a value of the field as a term in the map identified by the atom value
-// and return a copy suitable for returning from a NIF.
-inline ERL_NIF_TERM
-Field::encode(ErlNifEnv* env, ERL_NIF_TERM val)
-{
-  auto it = m_atom_map.find(val);
-  if (!enif_is_atom(env, val) || it == m_atom_map.end()) [[unlikely]]
-    return enif_make_badarg(env);
-  return enif_make_copy(env, it->second);
-}
-
 // Return: ok | exception Reason::binary()
-// a binary <<Tag/binary, $=, Value/binary, 1>>
+// Store result in `res` as a binary: <<Tag/binary, $=, Value/binary, 1>>
 inline ERL_NIF_TERM
-Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
-                       ERL_NIF_TERM tag, ERL_NIF_TERM val)
+Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
 {
   unsigned char tmp[64];
-  ErlNifBinary  btag, bval{};
+  ErlNifBinary  bval{};
   unsigned      grp_len = 0;
-
-  if (!enif_inspect_binary(env, tag, &btag)) [[unlikely]]
-    return am_error;
 
   if (m_dtype == DataType::GROUP) {
     if (enif_is_empty_list(env, val))
       grp_len = 0;
     else if (!enif_get_list_length(env, val, &grp_len))
-      return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "list of groups expected");
+      return MAKE_ENCODE_ERROR(this, env, "list of groups expected");
 
     bval.data = tmp;
     bval.size = snprintf((char*)tmp, sizeof(tmp), "%u", grp_len);
@@ -1138,16 +1150,16 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
       if      (enif_is_identical(am_true,  val)) tmp[0] = 'Y';
       else if (enif_is_identical(am_false, val)) tmp[0] = 'N';
       else
-        return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "invalid boolean");
+        return MAKE_ENCODE_ERROR(this, env, "invalid boolean");
       bval.data = tmp;
       bval.size = 1;
     } else if (enif_is_atom(env, val)) {
       auto it = m_atom_map.find(val);
       if (it == m_atom_map.end()) [[unlikely]]
-        return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "invalid atom");
+        return MAKE_ENCODE_ERROR(this, env, "invalid atom");
       val = it->second;
       if (!enif_inspect_binary(env, val, &bval)) [[unlikely]]
-        return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "invalid value");
+        return MAKE_ENCODE_ERROR(this, env, "invalid value");
     }
     else if (enif_get_long(env, val, &n)) {
       bval.size = (m_dtype == DataType::DATETIME)
@@ -1178,13 +1190,14 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
         bval.data = tmp;
       }
       else if (!enif_inspect_binary(env, val, &bval))
-        return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "invalid float");
+        return MAKE_ENCODE_ERROR(this, env, "invalid float");
     }
     else if (!enif_inspect_binary(env, val, &bval))
-      return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "invalid value");
+      return MAKE_ENCODE_ERROR(this, env, "invalid value");
   }
   assert(bval.data);
-  auto   sz     = btag.size + bval.size + 2 /* 2xSOH */;
+  auto   tag_sz = m_id_str.size();
+  auto   sz     = tag_sz + bval.size + 2 /* 2xSOH */;
   size_t needed = sz;
   unsigned char*  p;
 
@@ -1201,8 +1214,8 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
     p = res.data + offset;
   }
 
-  memcpy(p, btag.data, btag.size);
-  p   += btag.size;
+  memcpy(p, m_id_str.data(), tag_sz);
+  p   += tag_sz;
   *p++ = '=';
   memcpy(p, bval.data, bval.size);
   p   += bval.size;
@@ -1222,36 +1235,37 @@ Field::encode_with_tag(ErlNifEnv*   env, int& offset, ErlNifBinary& res,
     while (enif_get_list_cell(env, list, &head, &list)) {
       // Expecting [#{Name => Value}]
       if (!enif_is_map(env, head)) [[unlikely]]
-        return MAKE_ENCODE_ERROR(variant(), env, tag, btag, "group must be a map");
+        return MAKE_ENCODE_ERROR(this, env, "group must be a map");
 
       ErlMapIterator it(env, head);
 
       ERL_NIF_TERM fldname, fldval;
 
       while (it.next(fldname, fldval)) {
-        auto [field, tagnum_bin] = m_var->field_with_tag(env, fldname);
+        auto field = m_var->field(env, fldname);
 
-        if (!field) [[unlikely]]
-          return am_error;
+        if (!field) [[unlikely]] {
+          auto name = term_to_field_name(env, fldname);
+          return name.empty()
+            ? enif_raise_exception(env, am_badarg)
+            : MAKE_ENCODE_ERROR(this, env, "undefined field %s", name.c_str());
+        }
 
         if (i++ == 0) {
           if (delim == 0)
             delim = fldname;
           else if (!enif_is_identical(delim, fldname)) {
-            char expect[128], got[128], buf[512];
-            std::string group((const char*)btag.data, btag.size);
-
+            char expect[128], got[128];
             if (!enif_get_atom(env, delim,   expect, sizeof(expect), ERL_NIF_LATIN1) ||
                 !enif_get_atom(env, fldname, got,    sizeof(got),    ERL_NIF_LATIN1))
               return am_error;
 
-            snprintf(buf, sizeof(buf),
-                     "invalid first tag for group %s: expected=%s, got=%s",
-                     group.c_str(), expect, got);
-            return MAKE_ENCODE_ERROR(variant(), env, tag, btag, buf);
+            return MAKE_ENCODE_ERROR(this, env,
+              "invalid first tag for group %s: expected=%s, got=%s",
+              name(), expect, got);
           }
         }
-        auto rres = field->encode_with_tag(env, offset, res, tagnum_bin, fldval);
+        auto rres = field->encode(env, offset, res, fldval);
         if (rres != am_ok)
           return rres;
       }
@@ -1283,6 +1297,7 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
     m_variants_map.emplace(std::make_pair(am, m_variants.back().get()));
   }
 
+  am_badarg       = make_atom("badarg");
   am_decimal      = make_atom("decimal");
   am_enomem       = make_atom("enomem");
   am_exception    = make_atom("__exception__");
