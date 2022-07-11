@@ -236,26 +236,19 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return enif_raise_exception(env, am_badenv);
 
   FixVariant*  var;
-  int          code;
   ErlNifBinary bin;
 
   if (argc != 3 || !pers->get(argv[0], var)
-                || !arg_code(var, env, argv[1], code, 0)
                 || !enif_inspect_binary(env, argv[2], &bin)) [[unlikely]]
     return enif_make_badarg(env);
 
-  // The following is guaranteed by arg_code() call:
-  assert(code > 0 && code < var->field_count());
+  assert(var);
 
-  auto field = var->field(code);
+  auto field = var->field(env, argv[1]);
+  if (!field)
+    return enif_make_badarg(env);
 
-  assert(field);
-
-  // Does the field have any values?
-  if (field->has_values()) [[likely]]
-    return field->decode(env, (const char*)bin.data, bin.size);
-
-  return argv[1]; // Return unmodified binary if no field values are defined.
+  return field->decode(env, (const char*)bin.data, bin.size);
 }
 
 static ERL_NIF_TERM

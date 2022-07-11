@@ -42,6 +42,8 @@
 -type vars()    :: [{atom, list()|binary()}].
 
 -type options() :: #{
+  prefix     => binary(),
+  logpfx     => binary(),
   vars       => vars(),
   on_new     => on_new(),
   dir_fun    => fun((in|out|undefined) -> binary()|list()),
@@ -51,6 +53,10 @@
 }.
 %% Options passed to logger at startup:
 %% <dl>
+%% <dt>prefix</dt>
+%%   <dd>Prefix name to use when logging to a log file</dd>
+%% <dt>logpfx</dt>
+%%   <dd>Prefix name to use in calls to the system logger</dd>
 %% <dt>vars</dt>
 %%   <dd>Variable bindings used in filename substitution. E.g. [{type, "oe"}],
 %%       when Filename = "/tmp/%Y%m%d-krx-${type}.log"
@@ -226,12 +232,18 @@ init(Opts) ->
     UTC     = maps:get(utc,        Opts, false),
     Rotate  = maps:get(rotate,     Opts, date),
     Keep    = maps:get(keep_files, Opts, 5),
-    Pfx     = case maps:get(prefix,Opts) of
-                none -> "";
-                ""   -> "";
-                Str  -> to_list(Str)
+    Pfx     = case maps:find(prefix,Opts) of
+                error      -> "";
+                {ok, none} -> "";
+                {ok,   ""} -> "";
+                {ok,  Str} -> to_list(Str) ++ ": "
               end,
-    LogPfx  = if Pfx == "" -> ""; true -> Pfx ++ ": " end,
+    LogPfx  = case maps:find(logpfx,Opts) of
+                error      -> Pfx;
+                {ok, none} -> "";
+                {ok,   ""} -> "";
+                {ok, Str2} -> " " ++ to_list(Str2) ++ ": "
+              end
     (is_list(Vars)
       andalso lists:foldl(fun({K,V}, A) ->
                             A and is_atom(K) and is_string(V)

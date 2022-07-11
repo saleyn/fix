@@ -15,6 +15,7 @@
 #include <cassert>
 #include <string>
 #include <vector>
+#include <tuple>
 #include <filesystem>
 #ifndef NDEBUG
 #include <fstream>
@@ -321,14 +322,14 @@ struct Field {
 
   std::vector<FieldChoice> const& values() const { return m_choices; }
 
+  // Return atom value from a binary for an enumerated field
   template <typename Def>
-  ERL_NIF_TERM decode(ErlNifEnv* env, const char* code, int len, const Def& def);
+  ERL_NIF_TERM
+  decode_value(ErlNifEnv*, const char* val, int len, const Def& def) const;
 
-  ERL_NIF_TERM decode(ErlNifEnv* env, const char* code, int len)
-  {
-    auto   def = []() { return am_nil; };
-    return decode(env, code, len, def);
-  }
+  // Decode field's value
+  ERL_NIF_TERM decode(ErlNifEnv*, const char* val, int len,
+                      DoubleFmt fmt = DoubleFmt::Decimal) const;
 
   // Encode a value `val` of this field as binary stored in res as
   // `<<Tag/binary, 1, Value/binary, 1>>`. Return am_ok if all good or Erlang
@@ -585,6 +586,15 @@ binary_guard(ErlNifBinary& bin)
   return {&bin, [](ErlNifBinary* p){ if (p) enif_release_binary(p); }};
 }
 
+std::tuple<ERL_NIF_TERM, const char*, int>
+do_decode_value
+(
+  const Field* field, ErlNifEnv* env,
+  const unsigned char*& p, const unsigned char* end,
+  DataType dtype, DoubleFmt  double_fmt, bool ret_binary, char soh,
+  int&     next_data_length
+);
+
 namespace {
   template<int N, char... Chars>
   struct to_int_helper;
@@ -822,17 +832,32 @@ inline std::string to_string(const char* fmt, Args&&... args) {
   return buf;
 }
 
-#define MAKE_DECODE_ERROR(Var, Env, Err, Pos, Tag) \
-  make_decode_error(FILE_SRC_LOCATION, Var, Env, Err, Pos, Tag)
+#define MAKE_DECODE_ERROR(Var, Env, Err, Pos, ...) \
+  make_decode_error(FILE_SRC_LOCATION, Var, Env, Err, Pos, __VA_ARGS__)
 #define MAKE_ENCODE_ERROR(Fld, Env, ...) \
   make_encode_error(FILE_SRC_LOCATION, Fld, Env, __VA_ARGS__)
 
 template <int N>
 ERL_NIF_TERM
 make_decode_error(
-  const char (&src)[N], FixVariant* var, ErlNifEnv* env, const char* error,
-  long pos, int tag)
+  const char (&src)[N], const FixVariant* var, ErlNifEnv* env, const char* error,
+  long pos, int tag, int err_line = 0)
 {
+  const char* err_loc = basename(src);
+
+  char err_loc_buf[128];
+
+  // Overwrite the source location of err_line != 0
+  if (err_line) {
+    auto p = strchr(err_loc, ':');
+    ASSERT(p, err_loc, src+N);
+    p++;
+    auto len = p - err_loc;
+    strncpy(err_loc_buf, err_loc, len);
+    int_to_str(err_line, err_loc_buf+len, len);
+    err_loc = err_loc_buf;
+  }
+
   if (var->is_elixir()) {
     /*
     %{'__exception__' => true, '__struct__' => 'Elixir.FIX.DecodeError',
@@ -862,8 +887,8 @@ make_decode_error(
       reason,
       enif_make_long(env, tag),
       enif_make_long(env, pos),
-      enif_make_atom(env, error),
-      create_binary (env, basename(src))
+      create_binary (env, error),
+      create_binary (env, err_loc)
     };
 
     if (reason != am_enomem) [[likely]] {
@@ -877,10 +902,11 @@ make_decode_error(
   }
 
   return enif_raise_exception(env,
-          enif_make_tuple4(env, am_fix,
+          enif_make_tuple5(env, am_fix,
           enif_make_int(env,  tag),
           enif_make_atom(env, error),
-          enif_make_long(env, pos)));
+          enif_make_long(env, pos),
+          create_binary(env,  err_loc)));
 }
 
 template <int N, typename... Args>
@@ -1169,17 +1195,32 @@ Field::atom_to_bin(ErlNifEnv* env, ERL_NIF_TERM atom, ErlNifBinary& res) const
 }
 
 template <typename Def>
-inline ERL_NIF_TERM
-Field::decode(ErlNifEnv* env, const char* code, int len, const Def& def)
+inline ERL_NIF_TERM Field::decode_value(
+  ErlNifEnv* env, const char* val, int len, const Def& def) const
 {
   if (!m_decf || len < 1 || len > m_max_val_len) [[unlikely]]
     return def();
 
-  ASSERT(m_decf, code, code+len);
-
-  auto res = m_decf(*this, env, code, len);
+  auto res = m_decf(*this, env, val, len);
 
   return IS_LIKELY(res != 0) ? res : def();
+}
+
+inline ERL_NIF_TERM
+Field::decode(ErlNifEnv* env, const char* val, int len, DoubleFmt dfmt) const
+{
+  int next_data_length = -1;
+  const char       soh = '\0';
+  auto               p = (const unsigned char*)val;
+
+  auto [value, err_str, err_line] =
+    do_decode_value(this, env, p, p+len, m_dtype,
+                    dfmt, true, soh, next_data_length);
+
+  if (value == am_nil) [[unlikely]]
+    return MAKE_DECODE_ERROR(variant(), env, err_str, 0, m_id, err_line);
+
+  return value;
 }
 
 // Return: ok | exception Reason::binary()
@@ -1613,6 +1654,199 @@ FixVariant::field(unsigned idx)
 }
 
 //------------------------------------------------------------------------------
+
+inline bool check_end(const unsigned char* p, const unsigned char* end, char soh)
+{
+  return (p < end && *p == soh) || (p == end && !soh);
+}
+
+std::tuple<ERL_NIF_TERM, const char*, int>
+do_decode_value
+(
+  const Field*      field, ErlNifEnv*           env,
+  const unsigned char*& p, const unsigned char* end,
+  DataType          dtype, DoubleFmt     double_fmt,
+  bool         ret_binary, char                 soh,
+  int&   next_data_length
+)
+{
+  assert(field);
+
+  auto begin = p;
+  auto ptr   = p;
+
+  ERL_NIF_TERM value = am_nil;
+
+  switch (dtype) {
+    case DataType::INT: {
+      long ival=0;
+      p = str_to_int(ptr, end, ival, soh);
+      if (p == nullptr) [[unlikely]]
+        return std::make_tuple(am_nil, "expecing integer", __LINE__);
+
+      // Field number 9 is special, as it indicates the length of the FIX
+      // message payload, so treat it as integer
+      auto is_length   = field->type() == FieldType::LENGTH && field->id() != 9;
+      next_data_length = IS_UNLIKELY(is_length) ? ival : -1;
+
+      auto def = [=]() { return enif_make_long(env, ival); };
+
+      value = field->has_values()
+            ? field->decode_value(env, (const char*)ptr, p-ptr, def)
+            : enif_make_long(env, ival);
+
+      break;
+    }
+
+    case DataType::DOUBLE: {
+      long n=0, i=0;
+
+      for(; p < end && *p >= '0' && *p <= '9'; ++p, ++i)
+        n = n*10 + (*p - '0');
+
+      long   tmp  = i;
+      double mant = n, frac = 0, coeff = 1.0;
+
+      if (p != end) {
+        if (*p == '.') {
+          // ++p skips '.'
+          for(++p; p<end && *p >= '0' && *p <= '9'; ++i,++p) {
+            n      = n*10 + (*p - '0');
+            coeff *= 0.1;
+            frac  += (*p - '0')*coeff;
+          }
+        }
+      }
+
+      if (double_fmt == DoubleFmt::Binary || i > 19) {
+        auto sz   = p - ptr;
+        auto data = enif_make_new_binary(env, sz, &value);
+
+        if (!data) [[unlikely]]
+          return std::make_tuple(am_nil, "out of memory", __LINE__);
+
+        memcpy(data, ptr, sz);
+        break;
+      } else if (double_fmt == DoubleFmt::Decimal) {
+        value = enif_make_tuple3(env, am_decimal,
+                  enif_make_long(env, n), enif_make_long(env, i - tmp));
+      } else {
+        ASSERT(double_fmt == DoubleFmt::Double, begin, end);
+        double res = double(mant) + (mant < 0 ? -frac : +frac);
+        value      = enif_make_double(env, res);
+      }
+
+      break;
+    }
+
+    case DataType::GROUP: {
+      int ival=0;
+      p = str_to_int(ptr, end, ival, soh); // Get the number of repeating groups
+      if (p == nullptr)
+        return std::make_tuple(am_nil, "invalid group count", __LINE__);
+
+      value = enif_make_long(env, ival);
+      break;
+    }
+
+    case DataType::BINARY: {
+      // This field should have preceeded by the LENGTH integer field
+      // that would have set the "next_data_length" variable
+      if (next_data_length < 0)
+        while (p < end && *p != soh) ++p;
+      else {
+        p += next_data_length;
+        next_data_length = -1;
+      }
+
+      if (p > end) [[unlikely]]
+        return std::make_tuple(am_nil, "invalid binary length", __LINE__);
+
+      const auto len = p - ptr;
+
+      if (ret_binary) {
+        auto data = enif_make_new_binary(env, len, &value);
+        if (!data)
+          return std::make_tuple(am_nil, "out of memory", __LINE__);
+        memcpy(data, ptr, len);
+      } else {
+        value = enif_make_tuple2(env,
+                                  enif_make_uint(env, ptr-begin),
+                                  enif_make_uint(env, len));
+      }
+      break;
+    }
+
+    case DataType::STRING: {
+      // If the previous field was LENGTH which set "next_data_length", use it
+      if(next_data_length < 0) [[likely]]
+        while (p < end && *p != soh) ++p;
+      else {
+        p += next_data_length;
+        next_data_length = -1;
+      }
+
+      if (p > end) [[unlikely]]
+        return std::make_tuple(am_nil, "invalid string length", __LINE__);
+
+      auto def = [=]() {
+        return ret_binary ? create_binary(env, ptr, p-ptr)
+                          : enif_make_tuple2(env,
+                              enif_make_uint(env, ptr-begin),
+                              enif_make_uint(env, p-ptr));
+      };
+
+      value = field->has_values()
+            ? field->decode_value(env, (const char*)ptr, p-ptr, def)
+            : def();
+
+      break;
+    }
+
+    case DataType::DATETIME: {
+      while (p < end && *p != soh) ++p;
+
+      if (!check_end(p, end, soh)) [[unlikely]]
+        return std::make_tuple(am_nil, "missing datatime soh", __LINE__);
+
+      auto len = p - ptr;
+      auto ts  = decode_timestamp(env, reinterpret_cast<const char*>(ptr), len);
+
+      if (ts < 0) [[unlikely]]
+        return std::make_tuple(am_nil, "invalid datetime value", __LINE__);
+
+      value = enif_make_int64(env, ts);
+      break;
+    }
+
+    case DataType::BOOL: {
+      value = (*p == 'Y' || *p == 'y') ? am_true : am_false;
+      ++p; // Advance 1 char
+
+      break;
+    }
+
+    case DataType::CHAR: {
+      ++p; // Advance 1 char
+
+      auto def = [=]() { return enif_make_int(env, int(*ptr)); };
+
+      value = field->has_values()
+            ? field->decode_value(env, (const char*)ptr, p-ptr, def)
+            : def();
+      break;
+    }
+    default:
+      return std::make_tuple(am_nil, "unsupported data type", __LINE__);
+  }
+
+  if (!check_end(p, end, soh)) [[unlikely]]
+    return std::make_tuple(am_nil, "invalid value of missing soh", __LINE__);
+
+  return std::make_tuple(value, "", __LINE__);
+}
+
+//------------------------------------------------------------------------------
 inline ERL_NIF_TERM
 do_split(FixVariant* fvar, ErlNifEnv* env,
          const unsigned char*&  begin,  const unsigned char* end,
@@ -1709,233 +1943,56 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
   };
 
   for (const auto* p = ptr; ptr < msg_end; ptr = p) {
-    ERL_NIF_TERM value = 0;
+    if (state == ParserState::CODE) {
+      code = 0;
+      p    = str_to_int(ptr, end, code, '=');
+      if (!p)
+        return MAKE_DECODE_ERROR(fvar, env, "code", ptr - begin, code);
 
-    switch (state) {
-      case ParserState::CODE:
-        code = 0;
-        p    = str_to_int(ptr, end, code, '=');
-        if (!p)
-          return MAKE_DECODE_ERROR(fvar, env, "code", ptr - begin, code);
+      field = (code > 0 && code < fvar->field_count())
+            ? fvar->field(code) : fvar->field(0);
 
-        field = (code > 0 && code < fvar->field_count())
-              ? fvar->field(code) : fvar->field(0);
+      ASSERT(field, begin, end);
 
-        ASSERT(field, begin, end);
+      if (reply_size >= reply_capacity - 1) {
+        reply_capacity *= 2;
+        int size        = reply_capacity*sizeof(ERL_NIF_TERM);
 
-        if (reply_size >= reply_capacity - 1) {
-          reply_capacity *= 2;
-          int size        = reply_capacity*sizeof(ERL_NIF_TERM);
+        DBGPRINT(fvar->debug(), 2,
+          "FIX(%s): resizing reply to capacity: %d (size=%d)",
+          fvar->variant().c_str(), reply_capacity, size);
 
-          DBGPRINT(fvar->debug(), 2,
-            "FIX(%s): resizing reply to capacity: %d (size=%d)",
-            fvar->variant().c_str(), reply_capacity, size);
+        reply.reset((ERL_NIF_TERM*)realloc(reply.release(), size));
 
-          reply.reset((ERL_NIF_TERM*)realloc(reply.release(), size));
-
-          if (!reply)
-            return MAKE_DECODE_ERROR(fvar, env, "code_out_of_memory", ptr - begin, code);
-        }
-
-        tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
-            ? field->get_atom() : enif_make_long(env, code);
-
-        ASSERT(*p == '=', begin, end);
-        val_begin = val_end = ++p; // Skip '='
-
-        state = field->dtype();
-
-        if (state == ParserState::UNDEFINED) [[unlikely]] {
-          state = ParserState::BINARY;
-          next_data_length = -1;
-        }
-
-        ASSERT(state != ParserState::UNDEFINED && state != ParserState::CODE,
-               begin, end);
-
-        continue;
-
-      case ParserState::INT: {
-        long ival=0;
-        p = str_to_int(ptr, end, ival, soh);
-        if (p == nullptr)
-          return MAKE_DECODE_ERROR(fvar, env, "int", ptr - begin, code);
-
-        ASSERT(field, begin, end);
-
-        // Field number 9 is special, as it indicates the length of the FIX
-        // message payload, so treat it as integer
-        auto is_length   = field->type() == FieldType::LENGTH && code != 9;
-        next_data_length = IS_UNLIKELY(is_length) ? ival : -1;
-
-        auto def = [=]() { return enif_make_long(env, ival); };
-
-        value = field->has_values()
-              ? field->decode(env, (const char*)ptr, p-ptr, def)
-              : enif_make_long(env, ival);
-
-        ASSERT(value != am_nil, begin, end);
-
-        break;
+        if (!reply)
+          return MAKE_DECODE_ERROR(fvar, env, "code_out_of_memory", ptr - begin, code);
       }
 
-      case ParserState::DOUBLE: {
-        long n=0, i=0;
+      tag = IS_LIKELY(code < fvar->field_count() && field->assigned())
+          ? field->get_atom() : enif_make_long(env, code);
 
-        for(; p < end && *p >= '0' && *p <= '9'; ++p, ++i)
-          n = n*10 + (*p - '0');
+      ASSERT(*p == '=', begin, end);
+      val_begin = val_end = ++p; // Skip '='
 
-        if (p == end || (*p != '.' && *p != soh)) [[unlikely]]
-          return MAKE_DECODE_ERROR(fvar, env, "double_soh", ptr - begin, code);
+      state = field->dtype();
 
-        long   tmp  = i;
-        double mant = n, frac = 0, coeff = 1.0;
-        if (*p == '.') {
-          // ++p skips '.'
-          for(++p; p<end && *p >= '0' && *p <= '9'; ++i,++p) {
-            n      = n*10 + (*p - '0');
-            coeff *= 0.1;
-            frac  += (*p - '0')*coeff;
-          }
-        }
-
-        if (p == end || *p != soh) [[unlikely]]
-          return MAKE_DECODE_ERROR(fvar, env, "double_soh", ptr - begin, code);
-
-        if (double_fmt == DoubleFmt::Binary || i > 19) {
-          auto sz   = p - ptr;
-          auto data = enif_make_new_binary(env, sz, &value);
-
-          if (!data) [[unlikely]]
-            return MAKE_DECODE_ERROR(fvar, env, "binary_alloc", ptr - begin, code);
-          memcpy(data, ptr, sz);
-          break;
-        }
-        else if (double_fmt == DoubleFmt::Double) {
-          double res = double(mant) + (mant < 0 ? -frac : +frac);
-          value      = enif_make_double(env, res);
-        } else {
-          ASSERT(double_fmt == DoubleFmt::Decimal, begin, end);
-          value = enif_make_tuple3(env, am_decimal,
-                    enif_make_long(env, n), enif_make_long(env, i - tmp));
-        }
-
-        break;
+      if (state == ParserState::UNDEFINED) [[unlikely]] {
+        state = ParserState::BINARY;
+        next_data_length = -1;
       }
 
-      case ParserState::GROUP: {
-        int ival=0;
-        p = str_to_int(ptr, end, ival, soh); // Get the number of repeating groups
-        if (p == nullptr)
-          return MAKE_DECODE_ERROR(fvar, env, "group", ptr - begin, code);
+      ASSERT(state != ParserState::UNDEFINED && state != ParserState::CODE,
+              begin, end);
 
-        value = enif_make_long(env, ival);
-        break;
-      }
-
-      case ParserState::BINARY: {
-        // This field should have preceeded by the LENGTH integer field
-        // that would have set the "next_data_length" variable
-        if (next_data_length < 0)
-          while (p < end && *p != soh) ++p;
-        else {
-          p += next_data_length;
-          next_data_length = -1;
-        }
-
-        if (p >= end || *p != soh)
-          return MAKE_DECODE_ERROR(fvar, env, "binary", ptr - begin, code);
-
-        const auto len = p - ptr;
-
-        if (ret_binary) {
-          auto data = enif_make_new_binary(env, len, &value);
-          if (!data)
-            return MAKE_DECODE_ERROR(fvar, env, "binary_alloc", ptr - begin, code);
-          memcpy(data, ptr, len);
-        } else {
-          value = enif_make_tuple2(env,
-                                   enif_make_uint(env, ptr-begin),
-                                   enif_make_uint(env, len));
-        }
-        break;
-      }
-
-      case ParserState::STRING: {
-        // If the previous field was LENGTH which set "next_data_length", use it
-        if(next_data_length < 0) [[likely]]
-          while (p < end && *p != soh) ++p;
-        else {
-          p += next_data_length;
-          next_data_length = -1;
-        }
-
-        if (*p != soh || p >= end)
-          return MAKE_DECODE_ERROR(fvar, env, "string", ptr - begin, code);
-
-        ASSERT(field, begin, end);
-
-        auto def = [=]() {
-          return ret_binary ? create_binary(env, ptr, p-ptr)
-                            : enif_make_tuple2(env,
-                                enif_make_uint(env, ptr-begin),
-                                enif_make_uint(env, p-ptr));
-        };
-
-        value = field->has_values()
-              ? field->decode(env, (const char*)ptr, p-ptr, def)
-              : def();
-
-        if (value == am_nil) [[unlikely]]
-          return MAKE_DECODE_ERROR(fvar, env, "string_alloc_binary", ptr-begin, code);
-
-        break;
-      }
-
-      case ParserState::DATETIME: {
-        while (p < end && *p != soh) ++p;
-
-        if (*p != soh)
-          return MAKE_DECODE_ERROR(fvar, env, "datetime", ptr - begin, code);
-
-        auto len = p - ptr;
-        auto ts  = decode_timestamp(env, reinterpret_cast<const char*>(ptr), len);
-
-        if (ts < 0) [[unlikely]]
-          return MAKE_DECODE_ERROR(fvar, env, "datetime", ptr - begin, code);
-
-        value = enif_make_int64(env, ts);
-        break;
-      }
-
-      case ParserState::BOOL: {
-        value = (*ptr == 'Y' || *ptr == 'y') ? am_true : am_false;
-        if (++p == end || *p != soh)
-          return MAKE_DECODE_ERROR(fvar, env, "boolean_soh", ptr - begin, code);
-
-        break;
-      }
-
-      case ParserState::CHAR: {
-        if (++p == end || *p != soh)
-          return MAKE_DECODE_ERROR(fvar, env, "char_soh", ptr - begin, code);
-
-        auto def = [=]() { return enif_make_int(env, int(*ptr)); };
-
-        value = field->has_values()
-              ? field->decode(env, (const char*)ptr, p-ptr, def)
-              : def();
-        break;
-      }
-      default:
-        return MAKE_DECODE_ERROR(fvar, env, "unsupported_data_type", ptr - begin, code);
+      continue;
     }
 
-    if (p >= end) [[unlikely]]
-      return MAKE_DECODE_ERROR(fvar, env, "read_beyond_buffer_len", ptr - begin, code);
+    auto [value, err_str, err_line] =
+      do_decode_value(field, env, p, end, DataType(state),
+                      double_fmt, ret_binary, soh, next_data_length);
 
-    if (*p != soh) [[unlikely]]
-      return MAKE_DECODE_ERROR(fvar, env, "missing_soh", ptr - begin, code);
+    if (value == am_nil) [[unlikely]]
+      return MAKE_DECODE_ERROR(fvar, env, err_str, ptr - begin, code, err_line);
 
     state   = ParserState::CODE;
     val_end = p++;  // Skip SOH
