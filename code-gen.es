@@ -460,7 +460,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
            {"    <<"++q(CC), ">> -> " ++ sq(atom_name(caml_case(DD),State,ID)) ++ "; ", "%% " ++ integer_to_list(II) ++ "\n"}
             || {II,{CC,DD}} <- lists:zip(lists:seq(0, length(Vals)-1), Vals)
          ] ++
-         [{"    _", "   -> Val", "\n"}])
+         [{"    _", "   -> Val\n", ""}])
        end,
        "  end.\n\n",
        if Tp /= group ->
