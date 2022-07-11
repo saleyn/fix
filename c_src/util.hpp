@@ -1191,16 +1191,15 @@ Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
   ErlNifBinary  bval;
   unsigned      grp_len = 0;
 
-  if (!enif_inspect_binary(env, val, &bval)) {
+  if (has_values() && enif_is_atom(env, val)) {
+    if (!atom_to_bin(env, val, bval)) [[unlikely]]
+      return MAKE_ENCODE_ERROR(this, env, "invalid atom value");
+  }
+  else if (!enif_inspect_binary(env, val, &bval)) {
     bval.data = tmp;
 
     switch (m_dtype) {
       case DataType::CHAR: {
-        if (enif_is_atom(env, val)) {
-          if (!atom_to_bin(env, val, bval)) [[unlikely]]
-            return MAKE_ENCODE_ERROR(this, env, "invalid atom value");
-          break;
-        }
         int n;
         if (!enif_get_int(env, val, &n) && n >= 0 && n < 256) [[unlikely]]
           return MAKE_ENCODE_ERROR(this, env, "invalid integer");
@@ -1254,7 +1253,7 @@ Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
       case DataType::STRING: {
         auto n = enif_get_string(env, val, (char*)tmp, sizeof(tmp), ERL_NIF_LATIN1);
         if (!n) [[unlikely]]
-          return MAKE_ENCODE_ERROR(this, env, "invalid boolean");
+          return MAKE_ENCODE_ERROR(this, env, "invalid string");
         bval.size = std::abs(n)-1;  // n includes '\0'
         break;
       }
