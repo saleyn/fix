@@ -306,7 +306,7 @@ encode_fields_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     auto tag = tagval[0];
     auto val = tagval[1];
 
-    auto [field, numtag] = var->field_with_tag(env, tag);
+    auto field = var->field(env, tag);
     if (!field)
       return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, tag));
 

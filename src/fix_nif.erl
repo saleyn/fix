@@ -34,13 +34,14 @@ init_nif() ->
   %% directory names containing `*.so' files, or the full `*.so' file names
   %% or application names in which the `priv' dirs will be searched for
   %% '*.so' files:
-  TsType = application:get_env(fix, ts_type,      sec),
+  TsType = application:get_env(fix, ts_type, sec),
+  Debug  = application:get_env(fix, debug,     0),
 
   lists:member(TsType, [sec, us, ms]) orelse
-    throw("Invalid FIX_TS_TYPE=~s (expected: sec|us|ms)", [TsType]),
+    throw("Invalid FIX_TS_TYPE=~s (expected: sec|ms|us)", [TsType]),
 
   Files  = fix_util:find_variants(),
-  Dbg    = list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")),
+  Dbg    = max(list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")), Debug),
   Dbg > 0  andalso io:format("FIX so files: ~p\n", [Files]),
 
   Args = [{so_files, Files}, {debug, Dbg}, {ts_type, TsType}],
@@ -61,7 +62,8 @@ split(_Variant, _Binary) ->
 
 %% @doc Parse FIX binary message.
 %% If `Options' list has the `binary' atom, then return string fields as binaries.
--spec split(atom(), binary(), Options::[binary | full | {delim,char()}]) -> decoded_message().
+-spec split(atom(), binary(), Options::[binary | full | {delim,char()}]) ->
+        decoded_message().
 split(_Variant, _Binary, _Options) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 

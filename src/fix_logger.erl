@@ -17,7 +17,8 @@
 -behaviour(gen_server).
 
 %% External exports
--export([start_link/3, start/3, close/1, log/3, log/4, log/5, write/2, filename/1]).
+-export([start_link/3, start/3, close/1, log/3, log/4, log/5, write/2]).
+-export([filename/1, now/0, archive/5]).
 
 %% gen_server callbacks
 -export([
@@ -41,11 +42,12 @@
 -type vars()    :: [{atom, list()|binary()}].
 
 -type options() :: #{
-  vars    => vars(),
-  on_new  => on_new(),
-  dir_fun => fun((in|out|undefined) -> binary()|list()),
-  rotate  => date|{size, integer()}|none,
-  utc     => boolean()
+  vars       => vars(),
+  on_new     => on_new(),
+  dir_fun    => fun((in|out|undefined) -> binary()|list()),
+  rotate     => date|{size, Sz::integer()}|none,
+  keep_files => N::integer(),
+  utc        => boolean()
 }.
 %% Options passed to logger at startup:
 %% <dl>
@@ -66,12 +68,10 @@
 %%       By default the direction is printed as: `" <- "' for `in', `" -> "'
 %%       for `out', and `"    "' for `undefined'.
 %%   </dd>
-%% <dt>{rotate, Rotate}</dt>
-%%   <dd>Rotate logs by date (Rotate :: `date') or by file size
-%%       (Rotate :: {size, integer()})
-%%   </dd>
-%% <dt>{keep_files, N::integer()}</dt>
-%%   <dd>Keep this number of rotated files (only for Rotate of `{size, N}')</dd>
+%% <dt>rotate</dt>
+%%   <dd>Rotate logs by `date' or by file size `{size, Sz::integer()}'</dd>
+%% <dt>keep_files</dt>
+%%   <dd>Keep `N' number of rotated files (only for Rotate of `{size, Sz}')</dd>
 %% <dt>utc</dt><dd>Write time in UTC timezone</dd>
 %% </dl>
 
@@ -168,6 +168,38 @@ log(Logger, Dir, Fmt, Args, Now) ->
 write(Logger, Data) ->
   log2(Logger, {log, undefined, undefined, Data}).
 
+%% @doc Add files matching FileMask to a zip file `ZipFile', where files
+%%      must be older than the given `FromTS' timestamp.
+%%
+%% Example:
+%% <pre>
+%% 1> fix_logger:archive("log/%Y%m%d-one.log", "log/%Y%m.one.zip",
+%%      erlang:system_time(millisecond)-86400000*3, false, []).
+%% {ok, <<"log/202207.one.zip">>, [<<"log/20220625-one.log">>]}
+%% </pre>
+archive(FileMask, ZipFile, FromTS, UTC, Bindings)
+    when is_binary(FileMask), is_binary(ZipFile)
+       , is_integer(FromTS), is_boolean(UTC), is_list(Bindings) ->
+  FileML =  to_list(FileMask),
+  FileM  =  lists:foldl(fun ({M,Rep}, FM) ->
+                          lists:flatten(string:replace(FM, M, Rep))
+                        end,
+                        FileML,
+                        [{"%Y", "????"}, {"%m", "??"}, {"%d", "??"}]),
+  {DT,_}   = split_time(FromTS, UTC),
+  FileDT   = to_list(replace(FileML, DT, Bindings)),
+  Zip      = replace(to_list(ZipFile), DT, []),
+  case filelib:ensure_dir(FileDT) of
+    ok ->
+      Files = [F || F <- filelib:wildcard(FileM)
+                 ,  F <  FileDT],
+      {ok, Zip} = zip:create(Zip, Files),
+      [file:delete(F) || F <- Files],
+      {ok, list_to_binary(Zip), [list_to_binary(F) || F <- Files]};
+    {error, Reason} ->
+      {error, Reason}
+  end.
+
 %%%------------------------------------------------------------------------
 %%% Callback functions from gen_server
 %%%------------------------------------------------------------------------
@@ -223,8 +255,8 @@ init(Opts) ->
     Vars1 = [{K, to_list(V)} || {K,V} <- Vars],
 
     {ok, #state{fname_mask=File, on_new=OnNew, utc=UTC, dir_fun=Dir,
-                rotate=Rotate, vars=Vars1, keep_files=Keep,
-                prefix=Pfx, logpfx=LogPfx}}
+                rotate=Rotate,   vars=Vars1,   keep_files=Keep,
+                prefix=Pfx,      logpfx=LogPfx}}
   catch throw:Err:ST ->
     Error = "Error starting logger: " ++ Err,
     erlang:raise(error, Error, ST)
@@ -370,6 +402,7 @@ direction(undefined) -> undefined.
 now(undefined)  -> undefined;
 now(T) when is_integer(T), T > 1577836800000 -> T.  %% 2020-01-01
 
+%% @doc Return system time in number of milleseconds since epoch.
 now() -> erlang:system_time(millisecond).
 
 dir(undefined, Dir) ->

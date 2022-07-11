@@ -79,9 +79,11 @@ static ERL_NIF_TERM am_fix;
 static ERL_NIF_TERM am_decode_error;
 static ERL_NIF_TERM am_encode_error;
 static ERL_NIF_TERM am_group;
+static ERL_NIF_TERM am_magnitude;
 static ERL_NIF_TERM am_message;
 static ERL_NIF_TERM am_more;
 static ERL_NIF_TERM am_pos;
+static ERL_NIF_TERM am_precision;
 static ERL_NIF_TERM am_reason;
 static ERL_NIF_TERM am_src;
 static ERL_NIF_TERM am_struct;
@@ -309,6 +311,9 @@ struct Field {
   ERL_NIF_TERM            value_atom(unsigned idx) const;
   ERL_NIF_TERM            value_atom(std::string_view const& val) const;
 
+  // Lookup atom value in m_choices, and save its binary representation to `res`
+  bool atom_to_bin(ErlNifEnv*, ERL_NIF_TERM atom, ErlNifBinary& res) const;
+
   bool                    is_elixir()   const;
 
   FixVariant const*       variant()     const { assert(m_var); return m_var; }
@@ -424,20 +429,6 @@ struct FixVariant {
   Field const*        field(ErlNifEnv*, ERL_NIF_TERM tag) const;
   Field*              field(ErlNifEnv*, ERL_NIF_TERM tag);
 
-  // This function returns a pointer to a Field, and a binary tag
-  // value. Note that the binary is for internal use within the NIF
-  // driver, and if returned back to Erlang, need to be wrapped by
-  // a enif_make_copy() call!
-  FieldAndTagConst    field_with_tag(unsigned tag) const;
-  FieldAndTag         field_with_tag(unsigned tag);
-
-  // This function returns a pointer to a Field, and a binary tag
-  // value. Note that the binary is for internal use within the NIF
-  // driver, and if returned back to Erlang, need to be wrapped by
-  // a enif_make_copy() call!
-  FieldAndTagConst    field_with_tag(ErlNifEnv*, ERL_NIF_TERM tag) const;
-  FieldAndTag         field_with_tag(ErlNifEnv*, ERL_NIF_TERM tag);
-
   int                 field_count() const { return m_fields.size(); }
 
   // Return a shared binary representation of an integer that can be returned
@@ -525,6 +516,60 @@ const Ch* str_to_int(const Ch* s, const Ch* end, T& res, char delim = '\0', char
 
   res = sign*n;
   return s;
+}
+
+template <typename T, typename U, typename Ch, bool Zero = true, unsigned Base = 10u>
+Ch* int_to_str(T value, Ch* result, U& size)
+{
+  static_assert(std::is_integral_v<T>, "Integral required");
+  static_assert(Base <= 16);
+
+  //static constexpr int s_size = sizeof(T)*2 + sizeof(T)/2 +
+  //                              (std::is_signed_v<T> ? 2 : 1); // '\0' and '-'
+  //assert(size >= s_size);
+
+  char* p = (char*)result;
+  T     tmp;
+
+  do {
+    tmp    = value;
+    value /= Base;
+    *p++   = "fedcba9876543210123456789abcdef" [15 + (tmp - value * Base)];
+  } while (value);
+
+  // Apply negative sign
+  if constexpr(std::is_signed_v<T>)
+    if (value < 0) *p++ = '-';
+
+  auto end = (Ch*)p;
+
+  if constexpr(Zero)
+    *p = '\0';
+
+  // Reverse
+  for(auto q=(char*)result; q < --p; q++)
+    std::swap(*p, *q);
+
+  //p      = result;
+  //result = end;
+  //return p;
+  size = U(end - result);
+  return result;
+}
+
+template <int N, typename Ch, typename U>
+Ch* decimal_to_str(long magnitude, int prec, Ch (&buf)[N], U& size)
+{
+  long pow = 1;
+  for (auto i=0; i < prec; ++i) pow *= 10;
+  auto mm  = long(magnitude / pow);
+  auto pp  = magnitude  -  mm*pow;
+  auto tmp = (char*)buf;
+
+  size = U(prec==0
+            ? snprintf(tmp, N, "%ld", magnitude)
+            : snprintf(tmp, N, "%ld.%0*ld", mm, prec, pp));
+  return buf;
 }
 
 inline std::unique_ptr<ERL_NIF_TERM, void(*)(ERL_NIF_TERM*)>
@@ -1113,6 +1158,16 @@ Field::value_atom(unsigned idx) const
                                 : enif_make_badarg(m_var->env());
 }
 
+inline bool
+Field::atom_to_bin(ErlNifEnv* env, ERL_NIF_TERM atom, ErlNifBinary& res) const
+{
+  auto it = m_atom_map.find(atom);
+  if (it == m_atom_map.end()) [[unlikely]]
+    return false;
+  auto& v = it->second;
+  return !!enif_inspect_binary(env, v, &res);
+}
+
 template <typename Def>
 inline ERL_NIF_TERM
 Field::decode(ErlNifEnv* env, const char* code, int len, const Def& def)
@@ -1132,70 +1187,105 @@ Field::decode(ErlNifEnv* env, const char* code, int len, const Def& def)
 inline ERL_NIF_TERM
 Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
 {
-  unsigned char tmp[64];
-  ErlNifBinary  bval{};
+  unsigned char tmp[256];
+  ErlNifBinary  bval;
   unsigned      grp_len = 0;
 
-  if (m_dtype == DataType::GROUP) {
-    if (enif_is_empty_list(env, val))
-      grp_len = 0;
-    else if (!enif_get_list_length(env, val, &grp_len))
-      return MAKE_ENCODE_ERROR(this, env, "list of groups expected");
-
+  if (!enif_inspect_binary(env, val, &bval)) {
     bval.data = tmp;
-    bval.size = snprintf((char*)tmp, sizeof(tmp), "%u", grp_len);
-  } else {
-    long n;
-    if (m_dtype == DataType::BOOL) {
-      if      (enif_is_identical(am_true,  val)) tmp[0] = 'Y';
-      else if (enif_is_identical(am_false, val)) tmp[0] = 'N';
-      else
-        return MAKE_ENCODE_ERROR(this, env, "invalid boolean");
-      bval.data = tmp;
-      bval.size = 1;
-    } else if (enif_is_atom(env, val)) {
-      auto it = m_atom_map.find(val);
-      if (it == m_atom_map.end()) [[unlikely]]
-        return MAKE_ENCODE_ERROR(this, env, "invalid atom");
-      val = it->second;
-      if (!enif_inspect_binary(env, val, &bval)) [[unlikely]]
-        return MAKE_ENCODE_ERROR(this, env, "invalid value");
-    }
-    else if (enif_get_long(env, val, &n)) {
-      bval.size = (m_dtype == DataType::DATETIME)
-        ? encode_timestamp(tmp, n, pers()->ts_type())
-        : snprintf((char*)tmp, sizeof(tmp), "%ld", n);
-      bval.data = tmp;
-    }
-    else if (m_dtype == DataType::DOUBLE && !enif_is_binary(env, val)) {
-      double d;
-      int    arity, prec;
-      long   mant;
-      const  ERL_NIF_TERM* tup;
-      if (enif_get_double(env, val, &d)) {
-        bval.size = snprintf((char*)tmp, sizeof(tmp), "%.10f", d);
-        bval.data = tmp;
+
+    switch (m_dtype) {
+      case DataType::CHAR: {
+        if (enif_is_atom(env, val)) {
+          if (!atom_to_bin(env, val, bval)) [[unlikely]]
+            return MAKE_ENCODE_ERROR(this, env, "invalid atom value");
+          break;
+        }
+        int n;
+        if (!enif_get_int(env, val, &n) && n >= 0 && n < 256) [[unlikely]]
+          return MAKE_ENCODE_ERROR(this, env, "invalid integer");
+        tmp[0] = (char)n;
+        bval.size = 1;
+        break;
       }
-      else if (enif_get_tuple   (env, val, &arity, &tup) && arity == 3 &&
-               enif_is_identical(am_decimal, tup[0]) &&
-               enif_get_long    (env, tup[1], &mant) &&
-               enif_get_int     (env, tup[2], &prec)) {
-        long pow = 1;
-        for (auto i=0; i < prec; ++i) pow *= 10;
-        auto mm = long(mant / pow);
-        auto pp = mant - mm*pow;
-        bval.size = prec==0
-                  ? snprintf((char*)tmp, sizeof(tmp), "%ld", mant)
-                  : snprintf((char*)tmp, sizeof(tmp), "%ld.%0*ld", mm, prec, pp);
-        bval.data = tmp;
+      case DataType::INT: {
+        long n;
+        if (!enif_get_long(env, val, &n)) [[unlikely]]
+          return MAKE_ENCODE_ERROR(this, env, "invalid integer");
+
+        int_to_str(n, tmp, bval.size);
+        assert(bval.size < sizeof(tmp)-1);
+        break;
       }
-      else if (!enif_inspect_binary(env, val, &bval))
-        return MAKE_ENCODE_ERROR(this, env, "invalid float");
+      case DataType::DOUBLE: {
+        double d;
+        int    prec, arity;
+        long   magn;
+        const  ERL_NIF_TERM* tup;
+        ERL_NIF_TERM magnitude, precision;
+
+        if (enif_get_double(env, val, &d))
+          bval.size = snprintf((char*)tmp, sizeof(tmp), "%.8f", d);
+        // {decimal, Magnitude, Precision}
+        else if (enif_get_tuple   (env, val, &arity, &tup) && arity == 3 &&
+                 enif_is_identical(am_decimal, tup[0]) &&
+                 enif_get_long    (env, tup[1], &magn) &&
+                 enif_get_int     (env, tup[2], &prec))
+          decimal_to_str(magn, prec, tmp, bval.size);
+        // #{magnitude => Magnitude, precision => Precision}
+        else if (enif_is_map(env, val) &&
+                 enif_get_map_value(env, val, am_magnitude, &magnitude) &&
+                 enif_get_map_value(env, val, am_precision, &precision) &&
+                 enif_get_long(env, magnitude, &magn)                   &&
+                 enif_get_int (env, precision, &prec))
+          decimal_to_str(magn, prec, tmp, bval.size);
+        else
+          return MAKE_ENCODE_ERROR(this, env, "invalid float");
+        break;
+      }
+      case DataType::BOOL:
+        if      (enif_is_identical(am_true,  val)) tmp[0] = 'Y';
+        else if (enif_is_identical(am_false, val)) tmp[0] = 'N';
+        else
+          return MAKE_ENCODE_ERROR(this, env, "invalid boolean");
+        bval.size = 1;
+        break;
+
+      case DataType::STRING: {
+        auto n = enif_get_string(env, val, (char*)tmp, sizeof(tmp), ERL_NIF_LATIN1);
+        if (!n) [[unlikely]]
+          return MAKE_ENCODE_ERROR(this, env, "invalid boolean");
+        bval.size = std::abs(n)-1;  // n includes '\0'
+        break;
+      }
+      case DataType::DATETIME: {
+        long n;
+        if (!enif_get_long(env, val, &n) ||
+            !(bval.size = encode_timestamp(tmp, n, pers()->ts_type()))) [[unlikely]]
+          return MAKE_ENCODE_ERROR(this, env, "invalid timestamp");
+        break;
+      }
+      case DataType::GROUP:
+        if (enif_is_empty_list(env, val))
+          grp_len = 0;
+        else if (!enif_get_list_length(env, val, &grp_len)) [[unlikely]]
+          return MAKE_ENCODE_ERROR(this, env, "list of group maps expected");
+
+        int_to_str(grp_len, tmp, bval.size);
+        break;
+
+      case DataType::BINARY:
+        // If value were a binary, it would be converted before the switch statement
+        return MAKE_ENCODE_ERROR(this, env, "invalid binary");
+
+      default:
+        return MAKE_ENCODE_ERROR(this, env, "invalid data type");
     }
-    else if (!enif_inspect_binary(env, val, &bval))
-      return MAKE_ENCODE_ERROR(this, env, "invalid value");
-  }
+  } else if (m_dtype == DataType::GROUP)
+    return MAKE_ENCODE_ERROR(this, env, "invalid group value");
+
   assert(bval.data);
+
   auto   tag_sz = m_id_str.size();
   auto   sz     = tag_sz + bval.size + 2 /* 2xSOH */;
   size_t needed = sz;
@@ -1204,13 +1294,13 @@ Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
   if (!offset) {
     assert(res.data == nullptr);
     if (!enif_alloc_binary(needed, &res))
-      return enif_raise_exception(env, enif_make_tuple2(env, am_enomem, needed));
+      return MAKE_ENCODE_ERROR(this, env, "cannot allocate %d bytes", needed);
     p = res.data;
   } else {
     needed += offset;
     assert(res.data);
     if (needed > res.size && !enif_realloc_binary(&res, needed+256))
-      return enif_raise_exception(env, enif_make_tuple2(env, am_enomem, needed+256));
+      return MAKE_ENCODE_ERROR(this, env, "cannot allocate %d bytes", needed+256);
     p = res.data + offset;
   }
 
@@ -1261,8 +1351,8 @@ Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
               return am_error;
 
             return MAKE_ENCODE_ERROR(this, env,
-              "invalid first tag for group %s: expected=%s, got=%s",
-              name(), expect, got);
+              "invalid first tag for group %s [%d/%d]: expected=%s, got=%s",
+              name(), i, grp_len, expect, got);
           }
         }
         auto rres = field->encode(env, offset, res, fldval);
@@ -1308,8 +1398,10 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
   am_encode_error = make_atom("Elixir.FIX.EncodeError");
   am_group        = make_atom("group");
   am_message      = make_atom("message");
+  am_magnitude    = make_atom("magnitude");
   am_more         = make_atom("more");
   am_pos          = make_atom("pos");
+  am_precision    = make_atom("precision");
   am_reason       = make_atom("reason");
   am_src          = make_atom("src");
   am_struct       = make_atom("__struct__");
@@ -1519,40 +1611,6 @@ inline Field*
 FixVariant::field(unsigned idx)
 {
   return idx < m_fields.size() ? &m_fields[idx] : nullptr;
-}
-
-inline FixVariant::FieldAndTagConst
-FixVariant::field_with_tag(unsigned idx) const
-{
-  if (idx >= m_fields.size()) [[unlikely]]
-    return std::make_pair((Field const*)nullptr, ERL_NIF_TERM(0));
-  return std::make_pair(&m_fields[idx], m_bins[idx]);
-}
-
-inline FixVariant::FieldAndTag
-FixVariant::field_with_tag(unsigned idx)
-{
-  if (idx >= m_fields.size()) [[unlikely]]
-    return std::make_pair((Field*)nullptr, ERL_NIF_TERM(0));
-  return std::make_pair(&m_fields[idx], m_bins[idx]);
-}
-
-inline FixVariant::FieldAndTagConst
-FixVariant::field_with_tag(ErlNifEnv* env, ERL_NIF_TERM tag) const
-{
-  auto  fld = field(env, tag);
-  if  (!fld)  return std::make_pair(nullptr, 0);
-  assert(fld->id() > 0 && fld->id() < field_count());
-  return std::make_pair(fld, m_bins[fld->id()]);
-}
-
-inline FixVariant::FieldAndTag
-FixVariant::field_with_tag(ErlNifEnv* env, ERL_NIF_TERM tag)
-{
-  auto  fld = field(env, tag);
-  if  (!fld)  return std::make_pair(nullptr, 0);
-  assert(fld->id() > 0 && fld->id() < field_count());
-  return std::make_pair(fld, m_bins[fld->id()]);
 }
 
 //------------------------------------------------------------------------------
