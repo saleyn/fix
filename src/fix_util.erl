@@ -13,7 +13,7 @@
          dumpstr/1, dump/1, undump/1, split/5]).
 -export([try_encode_val/3, try_encode_group/3]).
 -export([encode_tagval/2,  encode_tagval/3]).
--export([find_variants/0]).
+-export([find_variants/0, add_variant_env/1]).
 
 -compile({no_auto_import,[now/0]}).
 -compile({parse_transform,etran}).
@@ -85,6 +85,17 @@ undump(Bin) when is_binary(Bin) ->
 dumpstr(Encoded) ->
   io:format("~s~n", [binary_to_list(dump(Encoded))]).
 
+%% @doc Add variant name to `fix_variants' config option of the `fix' app
+add_variant_env(Variant) ->
+  case application:get_env(fix, fix_variants, []) of
+    [] -> application:set_env(fix, fix_variants, [Variant]);
+    L  ->
+      case lists:member(Variant, L) of
+        true  -> ok;
+        false -> application:set_env(fix, fix_variants, [Variant|L])
+      end
+  end.
+
 %% @doc Find all known FIX variants `*.so' NIF libraries.
 -spec find_variants() -> [string()].
 find_variants() ->
@@ -153,7 +164,6 @@ find_variants() ->
     end
   end, [], Vars),
   lists:usort(Res).
-
 
 do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
 do_split(native, CodecMod, _Variant, Bin, Opts) -> fix_native:split(CodecMod, Bin, Opts).
