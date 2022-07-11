@@ -129,22 +129,45 @@ field_meta_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return enif_raise_exception(env, am_badenv);
 
   FixVariant* var;
-  int         code;
 
   // Args must be:
   // (Variant::atom(), Name::atom()|binary()|integer())
-  if ((argc != 2) || !pers->get(argv[0], var)
-                  || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
+  if ((argc != 2) || !pers->get(argv[0], var)) [[unlikely]]
     return enif_make_badarg(env);
 
   assert(var);
-  assert(code > 0 && code < var->field_count());
 
-  auto field = var->field(code);
-
-  assert(field);
+  auto field = var->field(env, argv[1]);
+  if (!field)
+    return enif_make_badarg(env);
 
   return field->meta(env);
+}
+
+static ERL_NIF_TERM
+lookup_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  FixVariant* var;
+
+  if (argc != 3 || !pers->get(argv[0], var)
+                || !enif_is_atom(env, argv[2])) [[unlikely]]
+    return enif_make_badarg(env);
+
+  auto tag = argv[1];
+  auto val = argv[2];
+
+  auto field = var->field(env, tag);
+  if (!field)
+    return enif_make_badarg(env);
+
+  ErlNifBinary res;
+  return field->atom_to_bin(env, val, res)
+       ? enif_make_binary(env, &res)
+       : enif_raise_exception(env, am_badarg);
 }
 
 // Convert (int()|binary()) -> atom():
@@ -877,6 +900,7 @@ static ErlNifFunc fix_nif_funcs[] =
   {"field_meta",            2, field_meta_nif},
   {"tag_to_field",          2, tag_to_field_nif},
   {"field_to_tag",          2, field_to_tag_nif},
+  {"lookup_field_value",    3, lookup_field_value_nif},
   {"decode_field_value",    3, decode_field_value_nif},
   {"encode_field",          3, encode_field_nif},
   {"encode_fields",         2, encode_fields_nif},

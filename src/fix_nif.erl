@@ -12,7 +12,7 @@
 
 -export([split/2, split/3, tag_to_field/2, field_to_tag/2, field_meta/2]).
 -export([bin_to_integer/1, bin_to_integer/2]).
--export([decode_field_value/3]).
+-export([lookup_field_value/3, decode_field_value/3]).
 -export([encode_fields/2, encode_field/3]).
 -export([list_field_values/2, list_fix_variants/0]).
 -export([decode_timestamp/1, decode_timestamp/2]).
@@ -85,6 +85,11 @@ encode_fields(_Variant, _TagVals) ->
 
 -spec encode_field(atom(), atom()|binary()|string()|integer(), atom()) -> binary().
 encode_field(_Variant, _Field, _Value) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+-spec lookup_field_value(atom(), atom()|binary()|string()|integer(), atom()) ->
+        binary().
+lookup_field_value(_Variant, _Field, _Value) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
 -spec decode_field_value(atom(), atom()|binary()|string()|integer(), binary()) ->
