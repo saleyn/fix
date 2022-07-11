@@ -774,7 +774,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
               "?MSG_INIT("++sq(atom_name(Msg,State,35))++")", ", 0, []);\n"}
         end
       end, MsgTypes) ++
-      [{"decode_msg(_,", "_)", " -> ", "false.", " ", " ", "\n"}]
+      [{"decode_msg(_,", "_)", " -> ", "false.\n", "", "", ""}]
     ),
     "\n",
     lists:map(fun({Enum, _Descr}) ->
