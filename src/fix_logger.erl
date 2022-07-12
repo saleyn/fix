@@ -243,7 +243,7 @@ init(Opts) ->
                 {ok, none} -> "";
                 {ok,   ""} -> "";
                 {ok, Str2} -> " " ++ to_list(Str2) ++ ": "
-              end
+              end,
     (is_list(Vars)
       andalso lists:foldl(fun({K,V}, A) ->
                             A and is_atom(K) and is_string(V)
