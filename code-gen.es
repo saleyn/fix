@@ -567,9 +567,9 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "encode(Hdr, #fix{msgtype=MsgType, fields=Msg}) when is_map(Hdr) ->\n"
     "  encode(nif, MsgType, Hdr, Msg).\n\n"
 
-    "-spec encode(nif|native, map()|#header{}, map()|#fix{}) -> binary().\n"
+    "-spec encode(nif|native|atom, map()|#header{}, map()|#fix{}) -> binary().\n"
     "encode(MsgType, Hdr, Msg) when is_atom(MsgType), is_map(Hdr), is_map(Msg) ->\n"
-    "  encode(nif, MsgType, Hdr, Msg);\n"
+    "  encode(nif, MsgType, Hdr, Msg);\n\n"
     "encode(Mode, #header{fields=H}, #fix{msgtype=MT, fields=M}) ->\n"
     "  encode(Mode, MT, H, M);\n"
     "encode(Mode, Hdr, #fix{msgtype=MT, fields=Msg}) ->\n"
