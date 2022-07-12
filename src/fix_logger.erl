@@ -236,7 +236,7 @@ init(Opts) ->
                 error      -> "";
                 {ok, none} -> "";
                 {ok,   ""} -> "";
-                {ok,  Str} -> to_list(Str)
+                {ok,  Str} -> " " ++ to_list(Str)
               end,
     LogPfx  = case maps:find(logpfx,Opts) of
                 error      -> Pfx;
