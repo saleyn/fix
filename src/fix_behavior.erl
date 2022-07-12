@@ -10,4 +10,4 @@
 
 %% @doc This callback implements a consumer of FIX messages.
 %% The API is free in implement the FIX message processing using this behavior.
--callback handle_fix(MsgType::atom(), MsgHeader::map(), Msg::map()) -> none().
+-callback handle_fix(MsgType::atom(), MsgHeader::map(), Msg::map()) -> any().
