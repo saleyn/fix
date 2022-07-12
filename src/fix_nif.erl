@@ -10,11 +10,13 @@
 
 -on_load(init_nif/0).
 
+-export([load_fix_variant/1, load_fix_variant/2, unload_fix_variant/1]).
+-export([list_fix_variants/0]).
 -export([split/2, split/3, tag_to_field/2, field_to_tag/2, field_meta/2]).
 -export([bin_to_integer/1, bin_to_integer/2]).
 -export([lookup_field_value/3, decode_field_value/3]).
 -export([encode_fields/2, encode_field/3]).
--export([list_field_values/2, list_fix_variants/0]).
+-export([list_field_values/2]).
 -export([decode_timestamp/1, decode_timestamp/2]).
 -export([encode_timestamp/1, encode_timestamp/2, encode_timestamp/3]).
 -export([checksum/1,  update_checksum/1]).
@@ -100,6 +102,22 @@ decode_field_value(_Variant, _Field, _Value) ->
 -spec list_field_values(atom(), atom()|binary()|string()|integer()) ->
         [{binary(), atom()}].
 list_field_values(_Variant, _Field) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+%% @doc Load a given FIX variant shared object file.
+%% Returns false if the variant name is already loaded.
+-spec load_fix_variant(binary()|string()) -> boolean().
+load_fix_variant(SoFile) -> load_fix_variant(SoFile, preserve).
+
+%% @doc Load a given FIX variant shared object file.
+%% If `Action' is `replace', the variant is replaced when it's already loaded.
+%% If `Action' is `preserve', the existing variant is not reloaded.
+-spec load_fix_variant(binary()|string(), replace|preserve) -> boolean().
+load_fix_variant(_SoFile, _Action) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+-spec unload_fix_variant(atom()) -> boolean().
+unload_fix_variant(_VariantName) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
 -spec list_fix_variants() -> [{atom(), binary()}].

@@ -39,7 +39,6 @@
   cpp_path = "c_src",
   erl_path = "src",
   elixir_path = "src",
-  inc_path = "include",
   app_descr= "",
   version,
   variants = [],      %% FIX Variant Name
@@ -48,6 +47,8 @@
   var_pfx  = "",      %% FIX variant prefix in lower case
   var_sfx  = "",      %% FIX variant suffix in lower case
   gen      = []  :: [erlang | elixir | cpp | build],
+  inc_path = "include",
+  hpp_path = ["../deps/fix/c_src"],
   src_dir  = filename:dirname(filename:absname(escript:script_name())),
   cur_dir  = filename:absname(""),  %% Current directory
   base_dir = false,   %% Is this generator invoked in the 'fix' project's dir?
@@ -108,6 +109,7 @@ usage() ->
     "     -gc                 - Generate C++ code only\n"
     "     -sfx  FileSfx       - Suffix to add to generated filenames (default: Variant)\n"
     "     -var  Variant       - FIX Variant name (this is a required argument)\n"
+    "     -hdir Path          - Include directory for C++ files   (default: ../deps/fix/c_src)\n"
     "     -cdir Path          - Output directory for C++ files    (default: ./c_src)\n"
     "     -edir Path          - Output directory for Erlang files (default: ./src)\n"
     "     -vsn  FixVSN        - Fix version tag (#8), default: \"FIX.4.4\"\n"
@@ -140,7 +142,7 @@ parse(["-var", V | T], S) -> V1 = string:to_lower(V),
                                              });
 parse(["-cdir",D | T], S) -> parse(T, S#state{cpp_path =   D});
 parse(["-edir",D | T], S) -> parse(T, S#state{erl_path =   D});
-parse(["-idir",D | T], S) -> parse(T, S#state{inc_path =   D});
+parse(["-hdir",D | T], S) -> parse(T, S#state{hpp_path = [D|S#state.hpp_path]});
 parse(["-d", Lvl | T], S) -> try
                                 I = list_to_integer(Lvl),
                                 parse(T, S#state{debug=I})
@@ -243,7 +245,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   MaxID  = lists:foldl(fun({field, AA, _}, I) -> max(I, get_attr(number, AA)) end, 0, Fields),
   WID    = length(integer_to_list(MaxID+1)),
   MaxLen = lists:foldl(fun({field, AA, _}, I) -> max(I, length(atom_name(get_attr(name, AA),State))) end, 0, Fields),
-  Filenm = add_variant_suffix("fix_fields.cpp", State),
+  Filenm = add_variant_suffix("fix_variant.cpp", State),
   ok     = write_file(cpp, src, State, Filenm, [], [
     "#include \"util.hpp\"\n\n"
     "namespace {\n\n"
@@ -372,7 +374,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  const char* fix_target_compiler() { return \"", iif(State#state.elixir, "elixir", "erlang"), "\"; }\n"
     "}\n"
   ]),
-  %% Generate fix_fields.erl
+  %% Generate fix_variant.erl
   MID = length(integer_to_list(lists:max([ID || {ID, _} <- FldList]))),
   Dsc = iif(State#state.variant=="", "", " " ++ State#state.variant),
   ANm = add_variant_suffix("fix", State),
@@ -386,7 +388,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  {env, [{config, []}]}\n"
     "]}.\n"
   ], false),
-  FN2 = add_variant_suffix("fix_fields", State),
+  FN2 = add_variant_suffix("fix_variant", State),
   ok  = write_file(erlang, src, State, FN2++".erl", [], [
     "-module(", FN2, ").\n"
     "-export([field/1, field_tag/1, encode_msg/2]).\n\n"
@@ -488,22 +490,40 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   ok  = write_file(erlang, src, State, FN3++".erl", [], [
     "%% @doc Interface module for the FIX ", State#state.variant, " variant\n\n"
     "-module(", FN3, ").\n"
+    "-export([init/0, init/1]).\n"
     "-export([decode/1, split/1, encode/1, encode/2, field/1]).\n"
+    "-export([encode_field_value/2, lookup_field_value/2, decode_field_value/2]).\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, encode/3, split/2, split/3]).\n"
     "\n"
     "-include(\"", FN3++".hrl\").\n"
     "\n"
     "-define(FIX_VARIANT,         ", nvl(State#state.variant, "default"), ").\n"
     "-define(FIX_DECODER_MODULE,  ", add_variant_suffix("fix_decoder", State), ").\n"
-    "-define(FIX_ENCODER_MODULE,  ", add_variant_suffix("fix_fields", State), ").\n"
+    "-define(FIX_ENCODER_MODULE,  ", add_variant_suffix("fix_variant", State), ").\n"
     "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
     "\n"
+    "%% @doc Initialize FIX variant\n"
+    "init() ->\n"
+    "  init(preserve).\n"
+    "init(Replace) when Replace==replace; Replace==preserve ->\n"
+    "  VarName = filename:join(code:priv_dir(", FN3, "), \"",
+      add_variant_suffix("fix_variant", State), ".so\"),\n"
+    "  fix_nif:load_fix_variant(VarName, Replace).\n\n"
     "%% @doc Get field's metadata\n"
     "-spec field(integer()|atom()) ->\n"
     "  [{id,integer()}|{name,atom()}|{data_type,atom()}|{type,atom()}|\n"
     "   {values, [{binary(),atom()}]}].\n"
     "field(ID) ->\n"
     "  fix_nif:field_meta(?FIX_VARIANT, ID).\n\n"
+    "%% @doc Encode field value\n"
+    "encode_field_value(ID, Value) ->\n"
+    "  fix_nif:encode_field(?FIX_VARIANT, ID, Value).\n\n"
+    "%% @doc Lookup enumerated field value\n"
+    "lookup_field_value(ID, Value) ->\n"
+    "  fix_nif:lookup_field_value(?FIX_VARIANT, ID, Value).\n\n"
+    "%% @doc Decode field value\n"
+    "decode_field_value(ID, Value) ->\n"
+    "  fix_nif:decode_field_value(?FIX_VARIANT, ID, Value).\n\n"
     "%% @see decode/3.\n"
     "decode(Bin)          -> decode(Bin, [binary, {float, decimal}]).\n\n"
     "%% @see decode/3.\n"
@@ -753,7 +773,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
     "-define(MAP_SET(_R, _F, _V), _R#fix{fields = (R#fix.fields)#{_F => _V}}).\n"
     "-define(MSG_INIT(_MT), #fix{msgtype=_MT}).\n"
     "\n"
-    "field(N) -> ", add_variant_suffix("fix_fields", State), ":field(N).\n\n"
+    "field(N) -> ", add_variant_suffix("fix_variant", State), ":field(N).\n\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
     "  case decode_msg_header(Msg, #fix{}, 0, []) of\n"
     "    {#fix{fields = H = #{", qname(atom_name('MsgType',State)), " := MT}}, I, L} when I > 0 ->\n"
@@ -1403,17 +1423,19 @@ write_file(Type, SrcOrInc, #state{outdir=Cwd, gen=Gen} = State, File, Header,
       ok
   end.
 
-generate_build_files(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath} = State) ->
-  IncDir    = filename:join(SrcDir, "c_src"),
+generate_build_files(#state{src_dir  = SrcDir,  outdir   = Cwd,
+                            cpp_path = CppPath, hpp_path = IncDirs} = State) ->
   CMakefile = filename:join(filename:join(Cwd, CppPath), "Makefile"),
   case filelib:is_regular(CMakefile) of
     true  -> ok;
     false ->
       DstFile = filename:join(CppPath, "Makefile"),
-      SrcFile = filename:join(IncDir,  "Makefile"),
-      io:format("Writing file:  ~s\n", [DstFile]),
+      SrcFile = filename:join(SrcDir,  "c_src/Makefile"),
+      io:format("Copying file:  ~s -> ~s\n", [SrcFile, DstFile]),
       {ok,F}  = file:read_file(SrcFile),
-      Data    = re:replace(F, "INC_DIR\\s*:=[^\n]+", "INC_DIR := -I" ++ IncDir ++ "\n",
+      Inc     = IncDirs,
+      IncDir  = string:join(["-I" ++ D || D <- Inc], " "),
+      Data    = re:replace(F, "INC_DIR *:=[^\n]*\n", "INC_DIR := " ++ IncDir ++ "\n",
                            [{return, binary}]),
       ok      = file:write_file(CMakefile, Data)
   end,
@@ -1492,7 +1514,7 @@ generate_build_files(#state{src_dir = SrcDir, outdir=Cwd, cpp_path = CppPath} = 
           "\trebar3 $@\n\n"
         end,
         "nif:\n"
-        "\tPROFILE=$(profile) make -C c_src\n\n"
+        "\tPROFILE=$(profile)$(if $(DEBUG)$(NIF_DEBUG), REBAR_ENV=test) make -C c_src\n\n"
         "clean:\n"
         "\trm -f c_src/*.o priv/*.so ebin/*.beam\n"
         "update upgrade:\n"

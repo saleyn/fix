@@ -22,6 +22,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-define(FIX_SO_FILE_MASK, "fix_variant*.so").
+
 %% @doc fix local reimplementation of UTC as a string
 -spec now() -> non_neg_integer().
 now() ->
@@ -110,15 +112,8 @@ find_variants() ->
   %% '*.so' files:
   Apps  = application:which_applications(),
   Vars  = case application:get_env(fix, fix_variants, []) of
-            [] ->
-              case get_variants_from_env() of
-                [] ->
-                  [filename:join(filename:dirname(I), "priv/fix_fields*.so")
-                    || I <- code:get_path(), string:find(I, "/fix") /= nomatch];
-                VV -> VV
-              end;
-            Variants ->
-              Variants
+            []       -> get_variants_from_env();
+            Variants -> Variants
           end,
   Res = lists:foldl(fun(V, S) ->
     {NoWarning, Msk} =
@@ -129,12 +124,12 @@ find_variants() ->
               {error, _} ->
                 error("Undefined priv directory of application: ~w", [V]);
               Dir ->
-                {false, filename:join(Dir, "fix_fields*.so")}
+                {false, filename:join(Dir, ?FIX_SO_FILE_MASK)}
             end;
           false ->
             Dir = filename:join([Root, atom_to_list(V), "priv"]),
             case filelib:is_dir(Dir) of
-              true  -> {false, filename:join(Dir, "fix_fields*.so")};
+              true  -> {false, filename:join(Dir, ?FIX_SO_FILE_MASK)};
               false -> error("Fix variant application '~w' is not known!", [V])
             end
         end;
@@ -142,9 +137,9 @@ find_variants() ->
         IsDir   = filelib:is_dir(V),
         IsFile  = filelib:is_file(V),
         Val     = iif(is_binary(V), binary_to_list(V), V),
-        IsWild  = string:find(Val, "fix_fields*.so") /= nomatch,
+        IsWild  = string:find(Val, ?FIX_SO_FILE_MASK) /= nomatch,
         if IsDir ->
-          {false, filename:join(Val, "fix_fields*.so")};
+          {false, filename:join(Val, ?FIX_SO_FILE_MASK)};
         IsFile; IsWild ->
           {IsWild, Val};
         true ->
@@ -221,8 +216,8 @@ get_variants_from_env() ->
       [];
     Env ->
       lists:foldl(fun(S,L) ->
-        L = [atom_to_list(element(1,A)) || A <- application:which_applications()],
-        case lists:member(S, L) of
+        LL = [atom_to_list(element(1,A)) || A <- application:which_applications()],
+        case lists:member(S, LL) of
           true  -> [list_to_atom(S) | L];
           false -> L
         end

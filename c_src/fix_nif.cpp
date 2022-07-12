@@ -35,6 +35,8 @@ static ERL_NIF_TERM am_full;
 static ERL_NIF_TERM am_local;
 static ERL_NIF_TERM am_ms;
 static ERL_NIF_TERM am_offset;
+static ERL_NIF_TERM am_preserve;
+static ERL_NIF_TERM am_replace;
 static ERL_NIF_TERM am_sec;
 static ERL_NIF_TERM am_so_files;
 static ERL_NIF_TERM am_ts_type;
@@ -272,8 +274,8 @@ encode_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   int offset = 0;
   ErlNifBinary output{};
-  auto guard = binary_guard(output);
-  auto res   = field->encode(env, offset, output, val);
+  auto bin_guard = guard(output);
+  auto res       = field->encode(env, offset, output, val);
 
   if  (res  != am_ok) [[unlikely]]
     return res;
@@ -281,7 +283,7 @@ encode_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   if (offset < int(output.size) && !enif_realloc_binary(&output, offset))
     return enif_raise_exception(env, am_enomem);
 
-  guard.release();
+  bin_guard.release();
 
   return enif_make_binary(env, &output);
 }
@@ -310,7 +312,7 @@ encode_fields_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   // binary will get automatically released. However after the loop, we
   // explicitely release the guard, since we need the binary to be returned
   // to the caller.
-  auto output_guard = binary_guard(output);
+  auto output_guard = guard(output);
 
   ERL_NIF_TERM  head, list = argv[1];
   const ERL_NIF_TERM* tagval;
@@ -390,9 +392,56 @@ list_fix_variants_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   res.reserve(pers->count());
 
   for (auto& v : pers->variants())
-    res.push_back(enif_make_atom(env, v->variant().c_str()));
+    res.push_back(enif_make_atom(env, v.second->name().c_str()));
 
   return enif_make_list_from_array(env, &res[0], res.size());
+}
+
+//------------------------------------------------------------------------------
+// Load and unload FIX variants
+//------------------------------------------------------------------------------
+static ERL_NIF_TERM
+load_fix_variant_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  ErlNifBinary bin = {.size = 0, .data = nullptr};
+  char buf[1024];
+  buf[0] =  '\0';
+
+  if (argc != 2 ||
+      !(enif_get_string(env, argv[0], buf, sizeof(buf), ERL_NIF_LATIN1) ||
+        enif_inspect_binary(env, argv[0], &bin)) ||
+      !(enif_is_identical(argv[1], am_replace)   ||
+        enif_is_identical(argv[1], am_preserve))) [[unlikely]]
+    return enif_make_badarg(env);
+
+  auto replace = argc == 2 && enif_is_identical(argv[1], am_replace);
+
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  auto file = buf[0] ? std::string(buf) : std::string((char*)bin.data, bin.size);
+
+  try {
+    auto   res = pers->load_fix_variant(file, replace);
+    return res ? am_true : am_false;
+  }
+  catch (std::exception const& e) {
+    return enif_raise_exception(env, create_binary(env, e.what()));
+  }
+}
+
+static ERL_NIF_TERM
+unload_fix_variant_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  if (argc != 1 || !enif_is_atom(env, argv[0])) [[unlikely]]
+    return enif_make_badarg(env);
+
+  auto pers = get_pers(env);
+  if (!pers) [[unlikely]]
+    return enif_raise_exception(env, am_badenv);
+
+  return pers->unload_fix_variant(argv[0], true) ? am_true : am_false;
 }
 
 static ERL_NIF_TERM
@@ -797,6 +846,8 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     am_local      = safe_make_atom(env, "local");
     am_ms         = safe_make_atom(env, "ms");
     am_offset     = safe_make_atom(env, "offset");
+    am_preserve   = safe_make_atom(env, "preserve");
+    am_replace    = safe_make_atom(env, "replace");
     am_sec        = safe_make_atom(env, "sec");
     am_so_files   = safe_make_atom(env, "so_files");
     am_ts_type    = safe_make_atom(env, "ts_type");
@@ -848,13 +899,11 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     }
   }
 
-  if (so_files.empty()) {
-    errs = "Missing required so_files argument!";
-    goto ERR;
-  } else if (debug > 0) {
+  if (so_files.empty())
+    DBGPRINT(debug, 1, "FIX: %s", "empty list of available variants!");
+  else if (debug > 0)
     for (auto& f : so_files)
       PRINT("FIX: file %s", f.c_str());
-  }
 
   return init_env(priv_data, so_files, debug, ts_type);
 
@@ -899,6 +948,7 @@ static ErlNifFunc fix_nif_funcs[] =
   {"encode_fields",         2, encode_fields_nif},
   {"list_field_values",     2, list_field_values_nif},
   {"list_fix_variants",     0, list_fix_variants_nif},
+  {"load_fix_variant",      2, load_fix_variant_nif},
   {"bin_to_integer",        1, bin_to_integer_nif},
   {"bin_to_integer",        2, bin_to_integer_nif},
   {"decode_timestamp",      1, decode_timestamp_nif},
@@ -907,6 +957,7 @@ static ErlNifFunc fix_nif_funcs[] =
   {"encode_timestamp",      2, encode_timestamp_nif},
   {"encode_timestamp",      3, encode_timestamp_nif},
   {"checksum",              1, checksum_nif},
+  {"unload_fix_variant",    1, unload_fix_variant_nif},
   {"update_checksum",       1, update_checksum_nif},
   {"strftime",              2, strftime_nif},
   {"strftime",              3, strftime_nif},

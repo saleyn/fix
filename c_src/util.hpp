@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <tuple>
+#include <mutex>
 #include <filesystem>
 #ifndef NDEBUG
 #include <fstream>
@@ -361,8 +362,7 @@ private:
 // Environment persistent across NIF calls
 //------------------------------------------------------------------------------
 struct Persistent {
-  using Variants = std::vector<std::unique_ptr<FixVariant>>;
-  using Map      = std::unordered_map<ERL_NIF_TERM, FixVariant*>;
+  using Map = std::unordered_map<ERL_NIF_TERM, std::unique_ptr<FixVariant>>;
 
   // Takes a vector of shared object files to load containing FIX variants
   Persistent
@@ -384,7 +384,10 @@ struct Persistent {
   bool                get(ERL_NIF_TERM, FixVariant*& var);
 
   size_t              count()           const { return m_variants.size(); }
-  Variants const&     variants()        const { return m_variants;        }
+  Map const&          variants()        const { return m_variants;        }
+
+  bool                load_fix_variant(const std::string& so_file,  bool replace);
+  bool                unload_fix_variant(ERL_NIF_TERM variant_name, bool lock);
 
   template <typename... Args>
   void Debug(int level, const char* fmt, Args... args) {
@@ -392,8 +395,8 @@ struct Persistent {
       fprintf(stderr, fmt, std::forward<Args>(args)...);
   }
 private:
-  Variants            m_variants;
-  Map                 m_variants_map;
+  std::mutex          m_mutex;
+  Map                 m_variants;
   ErlNifEnv*          m_env;
   int                 m_debug;
   TsType              m_ts_type;
@@ -410,14 +413,14 @@ struct FixVariant {
   using FieldAndTagConst = std::pair<Field const*, ERL_NIF_TERM>;
   using FieldAndTag      = std::pair<Field*,       ERL_NIF_TERM>;
 
-  FixVariant(Persistent* pers, const std::string& path);
+  FixVariant(Persistent* pers, const std::string& path, bool replace=true);
 
   ~FixVariant();
 
   int                 debug()     const { return m_pers->debug(); }
   Persistent  const*  pers()      const { return m_pers;          }
 
-  std::string const&  variant()   const { return m_variant;       }
+  std::string const&  name()      const { return m_name;          }
   bool                is_elixir() const { return m_elixir;        }
   std::string const&  so_path()   const { return m_so_path;       }
   ErlNifEnv*          env()             { return m_pers->env();   }
@@ -466,7 +469,7 @@ struct FixVariant {
 
 private:
   Persistent*           m_pers;
-  std::string           m_variant;
+  std::string           m_name;
   bool                  m_elixir;
   std::string           m_so_path;
   void*                 m_so_handle;
@@ -474,6 +477,15 @@ private:
   BinsArray             m_bins;       // <<"1">>, <<"2">>, ...
   NameToTagMap          m_name_to_tag_map;
   AtomToTagMap          m_atom_to_tag_map;
+};
+
+struct NonUniqueVariant : public std::exception
+{
+  NonUniqueVariant(std::string const& var_name) : m_name(var_name) {}
+
+  const char* name() const { return m_name.c_str(); }
+private:
+  std::string m_name;
 };
 
 //------------------------------------------------------------------------------
@@ -581,9 +593,16 @@ unique_term_ptr(void* ptr)
 
 // A unique smart pointer that releases ErlNifBinary when it goes out of scope
 inline std::unique_ptr<ErlNifBinary, void(*)(ErlNifBinary*)>
-binary_guard(ErlNifBinary& bin)
+guard(ErlNifBinary& bin)
 {
   return {&bin, [](ErlNifBinary* p){ if (p) enif_release_binary(p); }};
+}
+
+// A unique smart pointer that releases FixVariant when it goes out of scope
+inline std::unique_ptr<FixVariant, void(*)(FixVariant*)>
+guard(FixVariant* fvar)
+{
+  return {fvar, [](FixVariant* p){ if (p) delete p; }};
 }
 
 std::tuple<ERL_NIF_TERM, const char*, int>
@@ -811,6 +830,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 // NOTE: check for am_enomem upon return!
 inline ERL_NIF_TERM create_binary(ErlNifEnv* env, const std::string_view& s)
 {
+  assert(env);
+
   ErlNifBinary bin;
   if (!enif_alloc_binary(s.size(), &bin)) [[unlikely]]
     return am_enomem;
@@ -1022,8 +1043,9 @@ Field::Field
   , m_decf        (dec_fun)
 {
   assert(var);
+  assert(var->env());
   for(auto& fc : m_choices) {
-    auto val  = create_binary(var->env(),  fc.value);
+    auto val  = create_binary(var->env(), fc.value);
     if  (val == am_enomem) [[unlikely]]
       throw enomem_error("Failed to allocate %d bytes of memory for field#%d",
                          strlen(fc.value), id);
@@ -1421,10 +1443,7 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
     // Load the FIX variant implementation
     DBGPRINT(debug, 1, "FIX: loading %s", file.c_str());
 
-    auto p  = new FixVariant(this, file);
-    m_variants.emplace_back(std::unique_ptr<FixVariant>(p));
-    auto am = enif_make_atom(m_env, p->variant().c_str());
-    m_variants_map.emplace(std::make_pair(am, m_variants.back().get()));
+    load_fix_variant(file, true);
   }
 
   am_badarg       = make_atom("badarg");
@@ -1449,15 +1468,49 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
   am_nil          = make_atom("nil");
   am_ok           = make_atom("ok");
   am_true         = make_atom("true");
-
 }
 
 inline Persistent::~Persistent()
 {
-  m_variants_map.clear();
   m_variants.clear();
   enif_free_env(m_env);
   m_env = nullptr;
+}
+
+inline bool Persistent::load_fix_variant(const std::string& so_file, bool replace)
+{
+  std::unique_lock<std::mutex> lock(m_mutex);
+
+  try {
+    auto p      = new FixVariant(this, so_file, replace);
+    auto guardp = guard(p);
+
+    auto var = enif_make_atom(m_env, p->name().c_str());
+    m_variants.emplace(std::make_pair(var, std::unique_ptr<FixVariant>(p)));
+
+    guardp.release(); // This doesn't delete the pointer
+
+    return true;
+  }
+  catch (NonUniqueVariant const& e) {
+    DBGPRINT(m_debug, 1, "FIX: ignoring non-unique variant '%s'", e.name());
+    return false;
+  }
+}
+
+inline bool Persistent::unload_fix_variant(ERL_NIF_TERM variant_name, bool lock)
+{
+  std::unique_lock<std::mutex> guard(m_mutex, std::defer_lock);
+  if (lock)
+    guard.lock();
+
+  auto it    = m_variants.find(variant_name);
+  auto found = it != m_variants.end();
+
+  if (found)
+    m_variants.erase(it);
+
+  return found;
 }
 
 inline ERL_NIF_TERM Persistent::make_atom(const char* am)
@@ -1469,8 +1522,8 @@ FixVariant* Persistent::get(ERL_NIF_TERM variant)
 {
   assert(enif_is_atom(m_env, variant));
 
-  auto   it = m_variants_map.find(variant);
-  return IS_UNLIKELY(it == m_variants_map.end()) ? nullptr : it->second;
+  auto   it = m_variants.find(variant);
+  return IS_UNLIKELY(it == m_variants.end()) ? nullptr : it->second.get();
 }
 
 bool Persistent::get(ERL_NIF_TERM var_name, FixVariant*& var_ptr)
@@ -1485,7 +1538,7 @@ bool Persistent::get(ERL_NIF_TERM var_name, FixVariant*& var_ptr)
 
 //------------------------------------------------------------------------------
 inline FixVariant
-::FixVariant(Persistent* pers, std::string const& so_file)
+::FixVariant(Persistent* pers, std::string const& so_file, bool replace)
   : m_pers(pers)
   , m_so_path(so_file)
   , m_so_handle(dlopen(m_so_path.c_str(), RTLD_LAZY|RTLD_GLOBAL))
@@ -1532,18 +1585,34 @@ inline FixVariant
     return (factory)(this);
   };
 
-  m_variant = get_variant_name("fix_variant_name");
-  m_elixir  = is_elixir("fix_target_compiler");
-  m_fields  = get_fields("fix_create_fields");
+  m_name   = get_variant_name("fix_variant_name");
+  auto am  = enif_make_atom(pers->env(), m_name.c_str());
 
-  if (m_variant.size() == 0)
+  if (m_pers->get(am) != nullptr) {
+    if (replace)
+      m_pers->unload_fix_variant(am, false);
+    else {
+      DBGPRINT(m_pers->debug(), 1,
+               "FIX: variant '%s' already loaded", m_name.c_str());
+      dlclose(m_so_handle);
+      m_so_handle = nullptr;
+      throw NonUniqueVariant(m_name);
+    }
+  }
+
+  m_elixir = is_elixir("fix_target_compiler");
+  m_fields = get_fields("fix_create_fields");
+
+  if (m_name.size() == 0)
     throw std::runtime_error("Empty FIX variant in file: " + so_file);
   if (m_fields.size() == 0)
     throw std::runtime_error
-      ("FIX variant '" + m_variant + "' empty fields: " + so_file);
+      ("FIX variant '"+m_name+"' doesn't have any field definitions: "+so_file);
 
-  DBGPRINT(m_pers->debug(), 1, "FIX(%s): initializing %lu fields from file: %s",
-      m_variant.c_str(), m_fields.size(), so_file.c_str());
+  DBGPRINT(m_pers->debug(), 1,
+      "FIX: initializing variant '%s' with %lu fields from: %s (type=%s)",
+      m_name.c_str(), m_fields.size(), so_file.c_str(),
+      replace ? "replace" : "preserve");
 
   m_bins.resize(0);
   m_bins.reserve(m_fields.size()+1);
@@ -1555,7 +1624,7 @@ inline FixVariant
     int  len = snprintf(s, sizeof(s), "%d", i);
 
     DBGPRINT(m_pers->debug(), 4, "FIX(%s): initializing binary: %s",
-      m_variant.c_str(), s);
+      m_name.c_str(), s);
 
     auto val = create_binary(env(), s, len);
     if (val == am_enomem) [[unlikely]]
@@ -1582,6 +1651,9 @@ inline FixVariant
 
 inline FixVariant::~FixVariant()
 {
+  if (m_pers)
+    DBGPRINT(m_pers->debug(), 1, "FIX: removing variant %s", m_name.c_str());
+
   if (m_so_handle)
     dlclose(m_so_handle);
 }
@@ -1906,7 +1978,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
     return MAKE_DECODE_ERROR(fvar, env, "invalid_msg_terminator", msg_len, 0);
 
   DBGPRINT(fvar->debug(), 1, "FIX(%s): got message of size %d",
-    fvar->variant().c_str(), msg_len);
+    fvar->name().c_str(), msg_len);
 
   DUMP(fvar->debug(), begin, msg_end);  // For debugging in case of a crash
 
@@ -1960,7 +2032,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
         DBGPRINT(fvar->debug(), 2,
           "FIX(%s): resizing reply to capacity: %d (size=%d)",
-          fvar->variant().c_str(), reply_capacity, size);
+          fvar->name().c_str(), reply_capacity, size);
 
         reply.reset((ERL_NIF_TERM*)realloc(reply.release(), size));
 

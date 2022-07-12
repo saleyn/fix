@@ -21,11 +21,11 @@ http://quickfix.org/ project.
 `code-gen.es` is a parser generator that creates C++ and Erlang code based on
 the XML description of protocol. Generated files include:
 ```
-c_src/fix_fields.cpp
+c_src/fix_variant.cpp
 c_src/util.hxx
 include/fix_adm_msgs.hrl
 include/fix_app_msgs.hrl
-src/fix_fields.erl
+src/fix_variant.erl
 src/fix_decoder.erl
 src/fix_groups.erl
 ```
@@ -36,8 +36,8 @@ the generator in some other directory given the variant name (e.g. `cme`):
 $ mkdir cme
 $ cd cme
 $ ../code-gen.es -f /path/to/FIX.xml -var cme -c ../fix.config
-Writing file: ./c_src/fix_fields_cme.cpp
-Writing file: ./src/fix_fields_cme.erl
+Writing file: ./c_src/fix_variant.cpp
+Writing file: ./src/fix_variant_cme.erl
 Writing file: ./src/fix_variant_cme.erl
 Writing file: ./src/fix_decoder_cme.erl
 Writing file: ./include/fix_adm_msgs_cme.hrl
@@ -46,7 +46,7 @@ Writing file: ./src/fix_groups_cme.erl
 ```
 
 This generated code can be integrated in another application specific to the
-given FIX variant.  The generated and compiled shared object `fix_fields_cme.so`
+given FIX variant.  The generated and compiled shared object `fix_variant_cme.so`
 contains field decoding definitions and is loaded by the `fix` application using
 either the following configuration:
 
@@ -64,10 +64,10 @@ Alternatively the names of the variants to be loaded can be specified by the
 environment variables:
 ```
 export FIX_VARIANTS="default:cme"
-export FIX_SO_PATHS="/path/to/fix_fields_cme.so:/other/fix_fields_variant.so"
+export FIX_SO_PATHS="/path/to/fix_variant_cme.so:/other/fix_variant_ice.so"
 ```
 
-The NIF library of the `fix` project will load all `fix_fields*.so` shared
+The NIF library of the `fix` project will load all `fix_variant*.so` shared
 objects for each FIX variant requested.
 
 ### Encoding/Decoding

@@ -8,12 +8,12 @@ ERTS_INCLUDE_DIR ?= $(shell erl -noshell -noinput -eval "io:format(\"~ts/erts-~t
 ERL_INTERFACE_INCLUDE_DIR ?= $(shell erl -noshell -noinput -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, include)]), halt(0).")
 ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, lib)]), halt(0).")
 
-SOURCES := $(wildcard fix_nif.cpp) $(wildcard fix_fields*.cpp)
+SOURCES := $(wildcard fix_nif.cpp) $(wildcard fix_variant*.cpp)
 OBJECTS := $(addsuffix .o,  $(basename $(SOURCES)))
 TARGETS := $(addprefix $(BASEDIR)/priv/, $(addsuffix .so, $(basename $(SOURCES))))
 HEADERS := util.hpp
 
-INC_DIR := 
+INC_DIR :=
 
 all: $(TARGETS)
 
