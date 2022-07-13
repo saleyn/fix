@@ -229,8 +229,8 @@ using NameToTagMap   = std::unordered_map<std::string_view, int>;
 namespace {
   template <int N>
   inline const char* basename(const char (&file)[N]) {
-    auto p   = file + N;
-    auto end = file;
+    auto p    = file + N-1;
+    auto end  = file;
     while (p != end && *p != '/') --p;
     return p == end ? file : p+1;
   }
@@ -871,7 +871,7 @@ make_decode_error(
   // Overwrite the source location of err_line != 0
   if (err_line) {
     auto p = strchr(err_loc, ':');
-    ASSERT(p, err_loc, src+N);
+    ASSERT(p, err_loc, src+N-1);
     p++;
     auto len = p - err_loc;
     strncpy(err_loc_buf, err_loc, len);

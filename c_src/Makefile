@@ -36,7 +36,7 @@ else # ifeq ($(UNAME_SYS),Linux)
   CXX 		 ?= g++
 endif
 
-CXXFLAGS += $(ADDFLAGS) $(INC_DIR) -std=c++2a -finline-functions -Wall -Wno-return-type-c-linkage
+CXXFLAGS += $(ADDFLAGS) $(INC_DIR) -std=c++2a -finline-functions -Wall
 
 info:
 	@echo "Targets:  $(TARGETS)"
