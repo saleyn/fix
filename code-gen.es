@@ -716,13 +716,15 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
 
     FN3 = add_variant_suffix("fix_structs.ex", State),
     ok  = write_file(elixir, src, State, FN3, [], [
-      %"defmodule FIX.Header do\n"
-      %"  defstruct [\n",
-      %align_table([{"    "++atom_to_list(F)++": ", "nil,\n"} || F <- ReqFlds]),
-      %"  ]\n"
-      %"end\n\n",
-      "defmodule FIX.ParserError do\n"
-      "  defexception [:tag, :pos, :reason, :message, :bin, :src]\n\n"
+      "defmodule FIX.EncodeError do\n"
+      "  defexception [:tag, :message, :src]\n"
+      "\n"
+      "  def message(e), do: e.message\n"
+      "end\n"
+      "\n"
+      "defmodule FIX.DecodeError do\n"
+      "  defexception [:tag, :message, :pos, :reason, :src]\n"
+      "\n"
       "  def message(e), do: e.message\n"
       "end\n"
       %"\n"
