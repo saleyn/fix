@@ -13,7 +13,6 @@
          dumpstr/1, dump/1, undump/1, split/5]).
 -export([try_encode_val/3, try_encode_group/3]).
 -export([encode_tagval/2,  encode_tagval/3]).
--export([find_variants/0, add_variant_env/1]).
 
 -compile({no_auto_import,[now/0]}).
 -compile({parse_transform,etran}).
@@ -87,79 +86,6 @@ undump(Bin) when is_binary(Bin) ->
 dumpstr(Encoded) ->
   io:format("~s~n", [binary_to_list(dump(Encoded))]).
 
-%% @doc Add variant name to `fix_variants' config option of the `fix' app
-add_variant_env(Variant) ->
-  case application:get_env(fix, fix_variants, []) of
-    [] -> application:set_env(fix, fix_variants, [Variant]);
-    L  ->
-      case lists:member(Variant, L) of
-        true  -> ok;
-        false -> application:set_env(fix, fix_variants, [Variant|L])
-      end
-  end.
-
-%% @doc Find all known FIX variants `*.so' NIF libraries.
--spec find_variants() -> [string()].
-find_variants() ->
-  Priv = code:priv_dir(fix),
-  is_list(Priv) orelse
-    error("Cannot locate priv directory of the 'fix' application"),
-  Root = filename:dirname(filename:dirname(Priv)),
-
-  %% Get the list of supported FIX variants to load. These should be either
-  %% directory names containing `*.so' files, or the full `*.so' file names
-  %% or application names in which the `priv' dirs will be searched for
-  %% '*.so' files:
-  Apps  = application:which_applications(),
-  Vars  = case application:get_env(fix, fix_variants, []) of
-            []       -> get_variants_from_env();
-            Variants -> Variants
-          end,
-  Res = lists:foldl(fun(V, S) ->
-    {NoWarning, Msk} =
-      if is_atom(V) ->
-        case lists:keymember(V, 1, Apps) of
-          true ->
-            case code:priv_dir(V) of
-              {error, _} ->
-                error("Undefined priv directory of application: ~w", [V]);
-              Dir ->
-                {false, filename:join(Dir, ?FIX_SO_FILE_MASK)}
-            end;
-          false ->
-            Dir = filename:join([Root, atom_to_list(V), "priv"]),
-            case filelib:is_dir(Dir) of
-              true  -> {false, filename:join(Dir, ?FIX_SO_FILE_MASK)};
-              false -> error("Fix variant application '~w' is not known!", [V])
-            end
-        end;
-      is_list(V); is_binary(V) ->
-        IsDir   = filelib:is_dir(V),
-        IsFile  = filelib:is_file(V),
-        Val     = iif(is_binary(V), binary_to_list(V), V),
-        IsWild  = string:find(Val, ?FIX_SO_FILE_MASK) /= nomatch,
-        if IsDir ->
-          {false, filename:join(Val, ?FIX_SO_FILE_MASK)};
-        IsFile; IsWild ->
-          {IsWild, Val};
-        true ->
-          error("File/Dir name '~s' not found!", [Val])
-        end;
-      true ->
-        error("Invalid argument in fix.fix_variants: ~p", [V])
-      end,
-    case filelib:wildcard(Msk) of
-      [] when not NoWarning ->
-        logger:warning("No shared object files found matching name: ~s", [Msk]),
-        S;
-      [] ->
-        S;
-      Names ->
-        Names ++ S
-    end
-  end, [], Vars),
-  lists:usort(Res).
-
 do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
 do_split(native, CodecMod, _Variant, Bin, Opts) -> fix_native:split(CodecMod, Bin, Opts).
 
@@ -181,24 +107,39 @@ try_encode_val(ID, datetm, V) when is_integer(V) -> encode_tagval(ID, fix_nif:en
 try_encode_val(ID, datetm, V) when is_binary(V)  -> encode_tagval(ID, V);
 try_encode_val(ID, T,      V) -> erlang:error({cannot_encode_val, ID, T, V}).
 
-try_encode_group(Mod, ID, [#group{fields=[]}|T]) -> try_encode_group(Mod, ID, T);
-try_encode_group(Mod, ID, [#group{fields=L}|_] = V) when is_list(L) ->
-  N        = length(V),
-  DelimFld = element(1, hd(L)),
-  [try_encode_val(ID, length, N) | try_encode_group_items(Mod, ID, DelimFld, V)];
+try_encode_group(Mod, ID, [H|_] = V) ->
+  N            = integer_to_binary(length(V)),
+  {DelimFld,_} = first_element(H),
+  Items        = try_encode_next_group(Mod, ID, DelimFld, V),
+  [encode_tagval(ID, N) | Items];
 try_encode_group(_Mod, ID, []) ->
-  encode_tagval(ID, 0).
+  encode_tagval(ID, <<"0">>).
+
+first_element(M) when is_map(M) ->
+  I = maps:next(maps:iterator(M)),
+  {element(1,I), I};
+first_element([{K,_}|_]=L) ->
+  {K, L}.
 
 %% The group fields must all start from the same field name, so that the FIX
 %% decoder can decode groups correctly
-try_encode_group_items(Mod, ID, DelimFld, [#group{fields=[{DelimFld, _}|_]=V}|T]) ->
-  Data = [encode_field(Mod, K, I) || {K,I} <- V],
-  [Data | try_encode_group_items(Mod, ID, DelimFld, T)];
-try_encode_group_items(_Mod, ID, DelimFld, [#group{fields=[{Other, _}|_]}|_]) ->
-  S = str("invalid first tag for group ~w: expected=~w, got=~w", [ID, DelimFld, Other]),
-  erlang:error(list_to_binary(S));
-try_encode_group_items(_Mod, _ID, _DelimFld, []) ->
+try_encode_next_group(Mod, ID, DelimFld, [G|NextG]) ->
+  case first_element(G) of
+    {DelimFld, Iter} ->
+      [encode_group(Mod, Iter) | try_encode_next_group(Mod, ID, DelimFld, NextG)];
+    {Other, _} ->
+      S = str("invalid first tag for group ~w: expected=~w, got=~w", [ID, DelimFld, Other]),
+      erlang:error(list_to_binary(S))
+  end;
+try_encode_next_group(_Mod, _ID, _DelimFld, []) ->
   [].
+
+encode_group(Mod, {K,V,It}) ->
+  [encode_field(Mod, K, V) | encode_group(Mod, It)];
+encode_group(_, none) ->
+  [];
+encode_group(Mod, L) when is_list(L) ->
+  [encode_field(Mod, K, I) || {K,I} <- L].
 
 encode_tagval(ID, V)        -> encode_tagval(ID, V, true).
 encode_tagval(ID, V, true)  -> [integer_to_binary(ID), $=, V, ?SOH];
@@ -208,20 +149,6 @@ encode_field(Mod, ID, Val) when is_atom(ID) ->
   case Mod:field_tag(ID) of
     {_Num, _Type, false} -> encode_tagval(ID, Val, true);
     {_Num, _Type, Fun}   -> Fun(Val)
-  end.
-
-get_variants_from_env() ->
-  case os:getenv("FIX_VARIANTS") of
-    false ->
-      [];
-    Env ->
-      lists:foldl(fun(S,L) ->
-        LL = [atom_to_list(element(1,A)) || A <- application:which_applications()],
-        case lists:member(S, LL) of
-          true  -> [list_to_atom(S) | L];
-          false -> L
-        end
-      end, [], string:split(Env, ":", all))
   end.
 
 -ifdef(TEST).

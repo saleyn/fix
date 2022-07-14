@@ -26,7 +26,6 @@
 #include "util.hpp"
 
 static ERL_NIF_TERM am_badenv;
-static ERL_NIF_TERM am_badvariant;
 static ERL_NIF_TERM am_binary;
 static ERL_NIF_TERM am_debug;
 static ERL_NIF_TERM am_delim;
@@ -42,6 +41,7 @@ static ERL_NIF_TERM am_so_files;
 static ERL_NIF_TERM am_ts_type;
 static ERL_NIF_TERM am_us;
 static ERL_NIF_TERM am_utc;
+static ERL_NIF_TERM am_undefined_fix_variant;
 
 //------------------------------------------------------------------------------
 // NIFs
@@ -70,8 +70,10 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   if (argc < 2 || !enif_inspect_binary(env, argv[1], &input)) [[unlikely]]
     return enif_make_badarg(env);
+
   if (!pers->get(argv[0], var)) [[unlikely]]
-    return enif_raise_exception(env, am_badvariant);
+    return enif_raise_exception(env, am_undefined_fix_variant);
+
   if (argc == 3) {
     if (!enif_is_empty_list(env, argv[2])) {
       if (!enif_is_list(env, argv[2])) [[unlikely]]
@@ -134,8 +136,11 @@ field_meta_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   // Args must be:
   // (Variant::atom(), Name::atom()|binary()|integer())
-  if ((argc != 2) || !pers->get(argv[0], var)) [[unlikely]]
+  if (argc != 2) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   assert(var);
 
@@ -155,9 +160,11 @@ lookup_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   FixVariant* var;
 
-  if (argc != 3 || !pers->get(argv[0], var)
-                || !enif_is_atom(env, argv[2])) [[unlikely]]
+  if (argc != 3 || !enif_is_atom(env, argv[2])) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   auto tag = argv[1];
   auto val = argv[2];
@@ -186,9 +193,11 @@ tag_to_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   int         code;
 
   // Args must be: (Name::integer()|binary())
-  if (argc != 2 || !pers->get(argv[0], var)
-                || !arg_code(var, env, argv[1], code, 0)) [[unlikely]]
+  if (argc != 2 || !arg_code(var, env, argv[1], code, 0)) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   // NOTE: This is guaranteed by the arg_code() call!
   assert(var);
@@ -220,9 +229,11 @@ field_to_tag_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   // Args must be:
   // (Variant::atom(), Name::atom()|binary()) or (atom(), atom(), 'binary')
   if ((argc == 3  && !(is_bin = enif_is_identical(am_binary, argv[2]))) ||
-      (argc != 2) || !pers->get(argv[0], var)
-                  || !arg_code(var, env, argv[1], code, true)) [[unlikely]]
+      (argc != 2) || !arg_code(var, env, argv[1], code, true)) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   return is_bin ? var->copy_bin_tag(env, code) : enif_make_int(env, code);
 }
@@ -240,9 +251,11 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   FixVariant*  var;
   ErlNifBinary bin;
 
-  if (argc != 3 || !pers->get(argv[0], var)
-                || !enif_inspect_binary(env, argv[2], &bin)) [[unlikely]]
+  if (argc != 3 || !enif_inspect_binary(env, argv[2], &bin)) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   assert(var);
 
@@ -262,8 +275,11 @@ encode_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   FixVariant* var;
 
-  if (argc != 3 || !pers->get(argv[0], var)) [[unlikely]]
+  if (argc != 3) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   auto tag = argv[1];
   auto val = argv[2];
@@ -297,9 +313,13 @@ encode_fields_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   FixVariant* var;
 
-  if (argc != 2 || !pers->get(argv[0], var) ||
-      !(enif_is_list(env, argv[1]) || enif_is_empty_list(env, argv[1]))) [[unlikely]]
+  if (argc != 2 ||
+      !(enif_is_list(env, argv[1]) ||
+        enif_is_empty_list(env, argv[1]))) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   int   offset = 0;
   ErlNifBinary output{};
@@ -353,10 +373,11 @@ list_field_values_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   FixVariant* var;
   int         code;
 
-  if (argc != 2
-           || !pers->get(argv[0], var)
-           || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
+  if (argc != 2 || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
     return enif_make_badarg(env);
+
+  if (!pers->get(argv[0], var)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_fix_variant);
 
   auto f = var->field(code);
 
@@ -836,23 +857,23 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
   }
 
   try {
-    am_badenv     = safe_make_atom(env, "badenv");
-    am_badvariant = safe_make_atom(env, "badvariant");
-    am_binary     = safe_make_atom(env, "binary");
-    am_debug      = safe_make_atom(env, "debug");
-    am_delim      = safe_make_atom(env, "delim");
-    am_float      = safe_make_atom(env, "float");
-    am_full       = safe_make_atom(env, "full");
-    am_local      = safe_make_atom(env, "local");
-    am_ms         = safe_make_atom(env, "ms");
-    am_offset     = safe_make_atom(env, "offset");
-    am_preserve   = safe_make_atom(env, "preserve");
-    am_replace    = safe_make_atom(env, "replace");
-    am_sec        = safe_make_atom(env, "sec");
-    am_so_files   = safe_make_atom(env, "so_files");
-    am_ts_type    = safe_make_atom(env, "ts_type");
-    am_us         = safe_make_atom(env, "us");
-    am_utc        = safe_make_atom(env, "utc");
+    am_badenv                = safe_make_atom(env, "badenv");
+    am_binary                = safe_make_atom(env, "binary");
+    am_debug                 = safe_make_atom(env, "debug");
+    am_delim                 = safe_make_atom(env, "delim");
+    am_float                 = safe_make_atom(env, "float");
+    am_full                  = safe_make_atom(env, "full");
+    am_local                 = safe_make_atom(env, "local");
+    am_ms                    = safe_make_atom(env, "ms");
+    am_offset                = safe_make_atom(env, "offset");
+    am_preserve              = safe_make_atom(env, "preserve");
+    am_replace               = safe_make_atom(env, "replace");
+    am_sec                   = safe_make_atom(env, "sec");
+    am_so_files              = safe_make_atom(env, "so_files");
+    am_ts_type               = safe_make_atom(env, "ts_type");
+    am_us                    = safe_make_atom(env, "us");
+    am_utc                   = safe_make_atom(env, "utc");
+    am_undefined_fix_variant = safe_make_atom(env, "undefined_fix_variant");
   }
   catch (std::exception const& e) {
     errs = e.what();

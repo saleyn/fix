@@ -391,7 +391,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   FN2 = add_variant_suffix("fix_variant", State),
   ok  = write_file(erlang, src, State, FN2++".erl", [], [
     "-module(", FN2, ").\n"
-    "-export([field/1, field_tag/1, encode_msg/2]).\n\n"
+    "-export([field/1, field_tag/1, encode_msg/2, encode_field/2]).\n\n"
     "-import(fix_util, [try_encode_val/3, try_encode_group/3, encode_tagval/2]).\n\n",
     lists:map(fun({ID, {Name, Type, _FldOrGrp, Vals}}) ->
       [
@@ -404,22 +404,23 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
       ]
     end, lists:sort(FldList)),
     "field(", string:pad("_", MID), ") -> false.\n\n",
-    [begin
-      TT = maps:get(Type, MapDT),
-      SS = [string:pad(integer_to_list(ID), MID, leading), ", ", string:pad(atom_to_list(TT),6)],
-      ["field_tag(", sqpad(atom_to_list(Name), MaxLen), ") -> {", SS, ", fun(V) -> ",
-       if
-        TT == group ->
-          ["try_encode_group",string:pad(" ",MID-2),"(?MODULE,", string:pad(integer_to_list(ID), MID, leading), ", V)"];
-        Vals==[] ->
-          ["try_encode_val",string:pad(" ",MID),"(", SS, ", V)"];
-        true ->
-          ["encode_fld_val",string:pad(integer_to_list(ID),MID),"(", SS, ", V)"]
-       end,
-       " end};\n"
-      ]
-     end || {ID, {Name, Type, _FldOrGrp, Vals}} <- FldList],
-    "field_tag(_) -> erlang:error(badarg).\n"
+    align_table(
+      [begin
+        TT  = maps:get(Type, MapDT),
+        IDS = integer_to_list(ID),
+        [C1, C2, C3] =
+          if
+            TT == group ->
+              ["try_encode_group",    "(?MODULE,", IDS];
+            Vals==[] ->
+              ["try_encode_val",      "("++IDS++",", TT];
+            true ->
+              ["encode_fld_val"++IDS, "("++IDS++",", TT]
+          end,
+
+        {"field_tag("++sq(atom_name(Name,State)), ") -> {", IDS++",", TT, ", fun(V) -> ", C1, C2, C3, ", V) end};\n"}
+      end || {ID, {Name, Type, _FldOrGrp, Vals}} <- FldList] ++
+      [<<"field_tag(Tag) -> erlang:error({bad_field, Tag}).\n">>]),
     "\n"
     "-spec encode_msg(binary() | proplists:proplist(), binary()) -> iolist().\n"
     "encode_msg(Body0, FixVerStr) ->\n"

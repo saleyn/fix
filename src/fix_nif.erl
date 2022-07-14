@@ -42,19 +42,21 @@ init_nif() ->
   lists:member(TsType, [sec, us, ms]) orelse
     throw("Invalid FIX_TS_TYPE=~s (expected: sec|ms|us)", [TsType]),
 
-  Files  = fix_util:find_variants(),
-  Dbg    = max(list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")), Debug),
-  Dbg > 0  andalso io:format("FIX so files: ~p\n", [Files]),
+  Dbg  = max(list_to_integer(os:getenv("FIX_NIF_DEBUG", "0")), Debug),
+  Args = [{debug, Dbg}, {ts_type, TsType}],
 
-  Args = [{so_files, Files}, {debug, Dbg}, {ts_type, TsType}],
-
-  Priv = filename:dirname(code:which(?MODULE)) ++ "/../priv",
+  Priv = case code:priv_dir(fix) of
+           Dir when is_list(Dir) ->
+             Dir;
+           _ ->
+             filename:dirname(code:which(?MODULE)) ++ "/../priv"
+         end,
   Load = erlang:load_nif(filename:join(Priv, ?MODULE_STRING), Args),
 
   case Load of
     ok -> ok;
     {error, {Reason,Text}} ->
-      throw("Load fix_nif failed. ~p:~p~n", [Reason, Text])
+      error("Load fix_nif failed. ~p:~p\n", [Reason, Text])
   end.
 
 %% @doc Parse FIX binary message returning string fields as {Pos,Len} offsets.
