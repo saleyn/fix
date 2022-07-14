@@ -242,7 +242,7 @@ init(Opts) ->
                 error      -> Pfx;
                 {ok, none} -> "";
                 {ok,   ""} -> "";
-                {ok, Str2} -> " " ++ to_list(Str2) ++ ": "
+                {ok, Str2} -> to_list(Str2) ++ ": "
               end,
     (is_list(Vars)
       andalso lists:foldl(fun({K,V}, A) ->
@@ -449,18 +449,18 @@ log_to_file(State, Now, Dir, Data) ->
       safe_write_file(DateTime, Dir, Data, S1)
   end.
 
-maybe_open_file(#state{fd=undefined}=S, Now) ->
+maybe_open_file(#state{fd=undefined, logpfx=Pfx}=S, Now) ->
   FN = filename(Now, S),
   N  = filelib:file_size(FN),
   case file:open(FN, ?FILE_OPTS) of
   {ok, NewDev} ->
     {{Date,_},_} = Time = split_time(Now, S#state.utc),
     Created = N == 0,
-    Created andalso ?LOG_INFO("~screated new log file ~s", [S#state.prefix, FN]),
+    Created andalso ?LOG_INFO("~screated new log file ~s", [Pfx, FN]),
     {Created, Time, S#state{fd=NewDev, fname=FN, date=Date}};
   {error, Reason} ->
     E = file:format_error(Reason),
-    ?LOG_ERROR("~serror opening packet log file ~p: ~s", [S#state.prefix, FN, E]),
+    ?LOG_ERROR("~serror opening packet log file ~p: ~s", [Pfx, FN, E]),
     erlang:error(FN ++ ": " ++ E)
   end;
 maybe_open_file(State, Now) ->
