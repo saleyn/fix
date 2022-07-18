@@ -363,14 +363,16 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "}\n\n"
     "} // namespace\n\n",
     sep(cpp, 0),
-    "// Main FIX variant creation function exported from the shared object\n",
+    "// Main FIX variant creation functions exported from the shared object\n",
     sep(cpp, 0),
     "extern \"C\" {\n"
     "  std::vector<Field> fix_create_fields(FixVariant* fvar)\n"
     "  {\n"
     "    return make_all_fields(fvar);\n"
     "  }\n\n"
-    "  const char* fix_variant_name()    { return \"", get_fix_variant(State), "\"; }\n"
+    "  std::pair<const char*,const char*>\n"
+    "  fix_variant_name()    { return std::make_pair(\"", get_fix_variant(State), "\", \"",
+                                                          add_variant_suffix("fix", State) ,"\"); }\n\n"
     "  const char* fix_target_compiler() { return \"", iif(State#state.elixir, "elixir", "erlang"), "\"; }\n"
     "}\n"
   ]),
@@ -488,10 +490,11 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
   ]),
   %% Generate `fix_codec*.erl`
   FN3 = add_variant_suffix("fix", State, "codec"),
-  ok  = write_file(erlang, src, State, FN3++".erl", [], [
-    "%% @doc Interface module for the FIX ", State#state.variant, " variant\n\n"
-    "-module(", FN3, ").\n"
-    "-export([init/0, init/1]).\n"
+  ok  = write_file(erlang, src, State, FN3++".erl", [
+    "%% @doc Interface module for the FIX ", State#state.variant, " variant\n"],
+  [
+    "-module(", FN3, ").\n\n"
+    "-export([init/0, init/1, variant/0]).\n"
     "-export([decode/1, split/1, encode/1, encode/3, encode/4, field/1]).\n"
     "-export([encode_field_value/2, lookup_field_value/2, decode_field_value/2]).\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, split/2, split/3]).\n"
@@ -503,6 +506,8 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "-define(FIX_ENCODER_MODULE,  ", add_variant_suffix("fix_variant", State), ").\n"
     "-define(FIX_BEGIN_STR,       <<\"", State#state.version, "\">>).\n"
     "\n"
+    "%% @doc Return FIX variant name\n"
+    "variant() -> ?FIX_VARIANT.\n\n"
     "%% @doc Initialize FIX variant\n"
     "init() ->\n"
     "  init(preserve).\n"
@@ -544,29 +549,36 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "decode(Mode, Bin, Options) when is_binary(Bin), is_list(Options) ->\n"
     "  fix_util:decode(Mode, ?FIX_DECODER_MODULE, ?FIX_VARIANT, Bin, Options).\n"
     "\n"
-    "%% Decodes a list of [{Key, Value}] pairs to a FIX message.\n"
+    "%% @doc Decodes a list of [{Key, Value}] pairs to a FIX message.\n"
     "%% Use after splitting the message with split/1\n"
     "decode_msg(Msg) when is_list(Msg) ->\n"
-    "  ?FIX_DECODER_MODULE:decode_msg(Msg).\n"
-    "\n"
+    "  ?FIX_DECODER_MODULE:decode_msg(Msg).\n\n"
+
+    "%% @doc Split binary FIX message into field/value pairs\n"
     "split(Bin) -> split(nif,  Bin, [binary]).\n\n"
-    "%% @doc Split a FIX binary message to a list of key-value fields\n"
+
+    "%% @doc Split a FIX binary message to a list of key/value fields\n"
+    "-spec split(nif|native|binary(),\n"
+    "            binary()|[full|binary|{float, binary|string|decimal|number}]) ->\n"
+    "        [{atom(), any()}].\n"
     "split(Mode, Bin) when is_atom(Mode)  -> split(Mode, Bin, [binary]);\n"
     "split(Bin, Opts) when is_binary(Bin) -> split(nif,  Bin, Opts).\n\n"
     "-spec split(nif|native, binary(), [binary|full]) ->\n"
     "        [{atom(), binary()|{integer(),integer()}, any(), {integer(),integer()}}].\n"
     "split(Mode, Bin, Opts) when is_atom(Mode), is_binary(Bin), is_list(Opts) ->\n"
-    "  fix_util:split(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Bin, Opts).\n"
-    "\n"
+    "  fix_util:split(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Bin, Opts).\n\n"
 
+    "%% @doc Encode a FIX message\n"
     "-spec encode(#fix{}) -> binary().\n"
     "encode(#fix{msgtype=MsgType, header = Hdr, fields=Msg}) ->\n"
     "  encode(nif, MsgType, Hdr, Msg).\n\n"
 
+    "%% @doc Encode a FIX message given its type, header, and body\n"
     "-spec encode(atom(), map(), map()) -> binary().\n"
     "encode(MsgType, Hdr, Msg) when is_atom(MsgType), is_map(Hdr), is_map(Msg) ->\n"
     "  encode(nif, MsgType, Hdr, Msg).\n\n"
 
+    "%% @doc Encode a FIX message given its type, header, body, and nif/native mode\n"
     "-spec encode(nif|native, MsgType::atom(), map(), map()) -> binary().\n"
     "encode(Mode, MsgType, Hdr =\n"
     "      #{\n"

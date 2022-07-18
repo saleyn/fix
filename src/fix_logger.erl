@@ -17,7 +17,7 @@
 -behaviour(gen_server).
 
 %% External exports
--export([start_link/3, start/3, close/1, log/3, log/4, log/5, write/2]).
+-export([start_link/6, start/6, close/1, log/3, log/4, log/5, write/2]).
 -export([filename/1, now/0, archive/5]).
 
 %% gen_server callbacks
@@ -42,6 +42,9 @@
 -type vars()    :: [{atom, list()|binary()}].
 
 -type options() :: #{
+  xchg       => binary(),
+  variant    => atom(),
+  app        => atom(),
   prefix     => binary(),
   logpfx     => binary(),
   vars       => vars(),
@@ -53,36 +56,42 @@
 }.
 %% Options passed to logger at startup:
 %% <dl>
-%% <dt>prefix</dt>
+%% <dt>`{xchg, Exchange::binary()}'</dt>
+%%   <dd>Exchange name for this log</dd>
+%% <dt>`{variant, atom()}'</dt>
+%%   <dd>FIX variant that produces this log</dd>
+%% <dt>`{app, atom()}'</dt>
+%%   <dd>FIX variant application name that produces this log</dd>
+%% <dt>`{prefix, Prefix::binary()}'</dt>
 %%   <dd>Prefix name to use when logging to a log file</dd>
-%% <dt>logpfx</dt>
+%% <dt>`{logpfx, LogPfx::binary()}'</dt>
 %%   <dd>Prefix name to use in calls to the system logger</dd>
-%% <dt>vars</dt>
+%% <dt>`{vars, [{Var::atom(), Val::string()|binary()}]}'</dt>
 %%   <dd>Variable bindings used in filename substitution. E.g. [{type, "oe"}],
 %%       when Filename = "/tmp/%Y%m%d-krx-${type}.log"
 %%   </dd>
-%% <dt>on_new</dt>
-%%   <dd>Content to write to newly created file. It can be a string, a
-%%       binary, or a function that returns binary:
-%%       `fun((Filename::string()) -> string())'. In the last case the returned
-%%       value may contain variable names and date/time templates (similar to
-%%       the ones used in defining a filename), which will be substituted using
-%%       current time, and values passed in the `vars' option.
+%% <dt>`{on_new, ignore|string()|binary()|fun((Filename::binary()) -> Res)}'</dt>
+%%   <dd>Content to write to newly created file. It can be an atom `ignore',
+%%       a string, a binary, or a function that returns binary or atom `ignore'.
+%%       In the last case the returned value may contain variable names and
+%%       date/time templates (similar to the ones used in defining a filename),
+%%       which will be substituted using current time, and values passed in the
+%%       `vars' option.
 %%   </dd>
-%% <dt>dir_fun</dt>
+%% <dt>`dir_fun'</dt>
 %%   <dd>Direction-formatting function `fun(in|out|undefined) -> string()'.
 %%       By default the direction is printed as: `" <- "' for `in', `" -> "'
 %%       for `out', and `"    "' for `undefined'.
 %%   </dd>
-%% <dt>rotate</dt>
+%% <dt>`rotate'</dt>
 %%   <dd>Rotate logs by `date' or by file size `{size, Sz::integer()}'</dd>
-%% <dt>keep_files</dt>
+%% <dt>`keep_files'</dt>
 %%   <dd>Keep `N' number of rotated files (only for Rotate of `{size, Sz}')</dd>
-%% <dt>utc</dt><dd>Write time in UTC timezone</dd>
+%% <dt>`utc'</dt><dd>Write time in UTC timezone</dd>
 %% </dl>
 
 -type on_new() ::
-  fun((Filename::string()) -> string()|binary()) | string()| binary().
+  fun((Filename::string()) -> ignore|string()|binary())|ignore|string()|binary().
 -type dir_fun() :: fun((in|out|undefined) -> string()).
 
 -record(state, {
@@ -98,6 +107,9 @@
   sz_chk=0      :: integer(),                   %% Last file size checking time
   rotate        :: none|date|{size, integer()}, %% File rotation
   keep_files=5  :: integer(),                   %% Max number of rotated files
+  xchg          :: binary()|string(),           %% Exchange name
+  variant       :: atom(),                      %% FIX variant
+  app           :: atom(),                      %% FIX variant application name
   vars          :: vars(),                      %% Bindings for filename
   utc           :: boolean()                    %% Write time in UTC timezone
 }).
@@ -110,23 +122,30 @@
 %% @doc Called by a supervisor to start the logging process.
 %% @end
 %%------------------------------------------------------------------------------
--spec start_link(Name::atom(), string(), Options::options()) ->
+-spec start_link(Name::atom(), App::atom(), Variant::atom(),
+                 Xchg::string()|binary(), string(), Options::options()) ->
         {ok, Pid::pid()} | {error, Reason :: any()}.
-start_link(Name, Filename, Options) ->
-  startit(Name, start_link, Filename, Options).
+start_link(Name, App, Variant, Xchg, Filename, Options) ->
+  startit(Name, start_link, App, Variant, Xchg, Filename, Options).
 
--spec start(Name::atom(), string(), Options::options()) ->
+-spec start(Name::atom(), App::atom(), Variant::atom(),
+            Xchg::string()|binary(), string(), Options::options()) ->
         {ok, Pid::pid()} | {error, Reason :: any()}.
-start(Name, Filename, Options) ->
-  startit(Name, start, Filename, Options).
+start(Name, App, Variant, Xchg, Filename, Options) ->
+  startit(Name, start, App, Variant, Xchg, Filename, Options).
 
-startit(Name, F, Filename, Opts) when is_atom(Name), is_atom(F), is_map(Opts) ->
-  Map = case maps:find(prefix, Opts) of
-          {ok, none} -> Opts#{prefix => ""};
-          {ok, _}    -> Opts;
-          error      -> Opts#{prefix => atom_to_list(Name)}
-        end,
-  gen_server:F({local, Name}, ?MODULE, maps:put(filename, Filename, Map), []).
+startit(Name, F, App, Variant, Xchg, Filename, Opts)
+  when is_atom(Name), is_atom(F), is_atom(App), is_atom(Variant),
+      (is_list(Xchg) orelse is_binary(Xchg)), is_map(Opts) ->
+  Map   = case maps:find(prefix, Opts) of
+            {ok, none} -> Opts#{prefix => ""};
+            {ok, _}    -> Opts;
+            error      -> Opts#{prefix => atom_to_list(Name)}
+          end,
+  Opts1 = maps:merge(Map,
+                    #{filename => Filename, app  => App,
+                      variant  => Variant,  xchg => Xchg}),
+  gen_server:F({local, Name}, ?MODULE, Opts1, []).
 
 %%------------------------------------------------------------------------------
 %% @doc Close currently open log file.
@@ -226,6 +245,9 @@ archive(FileMask, ZipFile, FromTS, UTC, Bindings)
 init(Opts) ->
   try
     File    = to_list(maps:get(filename, Opts)),
+    Xchg    = maps:get(xchg,       Opts, undefined),
+    Var     = maps:get(variant,    Opts, undefined),
+    App     = maps:get(app,        Opts, undefined),
     Vars    = maps:get(vars,       Opts, []),
     OnNew   = maps:get(on_new,     Opts, ""),
     Dir     = maps:get(dir_fun,    Opts, undefined),
@@ -236,7 +258,7 @@ init(Opts) ->
                 error      -> "";
                 {ok, none} -> "";
                 {ok,   ""} -> "";
-                {ok,  Str} -> " " ++ to_list(Str)
+                {ok,  Str} -> to_list(Str)
               end,
     LogPfx  = case maps:find(logpfx,Opts) of
                 error      -> Pfx;
@@ -244,14 +266,25 @@ init(Opts) ->
                 {ok,   ""} -> "";
                 {ok, Str2} -> to_list(Str2) ++ ": "
               end,
+    (is_binary(Xchg) orelse is_list(Xchg))
+      orelse throw("xchg parameter missing"),
+    Var == undefined andalso throw("var parameter missing"),
+    is_atom(Var)      orelse throw("var parameter must be an atom"),
+    App == undefined andalso throw("app parameter missing"),
+    is_atom(App)      orelse throw("app parameter must be an atom"),
     (is_list(Vars)
       andalso lists:foldl(fun({K,V}, A) ->
                             A and is_atom(K) and is_string(V)
                           end, true, Vars))
       orelse  throw("vars must be of type [{atom, string|binary}]"),
     is_string(OnNew)
-      orelse (is_function(OnNew, 1) andalso is_string(OnNew("Test")))
-      orelse  throw("on_new must be string|list|fun/1"),
+      orelse OnNew==ignore
+      orelse (is_function(OnNew, 1) andalso
+              case OnNew("Test") of
+                ignore -> true;
+                V      -> is_list(V) orelse is_binary(V)
+              end)
+      orelse  throw("on_new must be string|list|fun/1 or atom 'ignore'"),
     Dir == undefined
       orelse (is_function(Dir, 1)
               andalso (is_list(Dir(in))        orelse is_binary(Dir(in)))
@@ -266,9 +299,9 @@ init(Opts) ->
 
     Vars1 = [{K, to_list(V)} || {K,V} <- Vars],
 
-    {ok, #state{fname_mask=File, on_new=OnNew, utc=UTC, dir_fun=Dir,
-                rotate=Rotate,   vars=Vars1,   keep_files=Keep,
-                prefix=Pfx,      logpfx=LogPfx}}
+    {ok, #state{fname_mask=File, on_new=OnNew,  utc=UTC,     dir_fun=Dir,
+                rotate=Rotate,   vars=Vars1,    keep_files=Keep, app=App,
+                prefix=Pfx,      logpfx=LogPfx, xchg=Xchg,   variant=Var}}
   catch throw:Err:ST ->
     Error = "Error starting logger: " ++ Err,
     erlang:raise(error, Error, ST)
@@ -437,12 +470,25 @@ dir(F, Dir) when is_function(F, 1) ->
 log_to_file(State, Now, Dir, Data) ->
   case maybe_open_file(State, Now) of
     {true, DateTime={DT,_}, #state{on_new=OnNew, fname=FN, vars=Vars} = S1} ->
-      Header = if
-        is_function(OnNew, 1)            -> OnNew(FN);
-        is_list(OnNew); is_binary(OnNew) -> OnNew;
-        true                             -> ""
+      H0 = if is_function(OnNew, 1) -> OnNew(FN); true -> OnNew end,
+      H1 = if
+        is_list(H0); is_binary(H0) ->
+          replace(to_list(H0), DT, Vars);
+        H0==ignore ->
+          H0;
+        true ->
+          ""
       end,
-      Hdr = replace(to_list(Header), DT, Vars),
+      Hdr =
+        if H1 == ignore ->
+          "";
+        true ->
+          io_lib:format(
+            "## FIX log: exchange=~s, variant=~s, app=~s~s~s\n",
+            [State#state.xchg, atom_to_list(State#state.variant),
+             atom_to_list(State#state.app),
+             if H1==""; H1 == <<"">> -> undefined; true -> ": " end, H1])
+        end,
       State2 = safe_write_file(DateTime, header, Hdr, S1),
       safe_write_file(DateTime, Dir, Data, State2);
     {false, DateTime, S1} ->
@@ -622,13 +668,14 @@ log_test() ->
               (out) -> "O|";
               (_)   -> " |"
             end,
-  Opts    = #{rotate => none, utc=>true, prefix => Prefix, dir_fun => DirFun,
-              on_new => fun(F) -> "## New file: %Y%m%d\n" end},
+  Opts    = #{rotate  => none, utc => true,
+              prefix  => Prefix, dir_fun => DirFun,
+              on_new  => fun(F) -> "%Y%m%d\n" end},
   Filenm  = "/tmp/%Y%m%d.test.fix.log",
   FName   = replace(Filenm, DTime, []),
   file:delete(FName),
 
-  Logger  = fix_logger:start_link(flt, Filenm, Opts),
+  Logger  = fix_logger:start_link(flt, tmp_app, var, "TMP", Filenm, Opts),
   Now     = erlang:universaltime_to_posixtime(DTime)*1000,
   fix_logger:log(flt, out, "Test\n", [], Now),
   FN = fix_logger:filename(flt),
@@ -640,10 +687,11 @@ log_test() ->
   {{Y,M,D},{HH,MM,SS}} = DTime,
   {ok, Bin} = file:read_file(FN),
   Expect    = lists:flatten(io_lib:format(
-    "## New file: ~w~.2.0w~.2.0w\n"
+    "## FIX log: exchange=TMP, variant=var, app=tmp_app: ~w~.2.0w~.2.0w\n\n"
     "~w~.2.0w~.2.0w-~.2.0w:~.2.0w:~.2.0w.000~sO|Test\n",
     [Y,M,D,Y,M,D,HH,MM,SS, Prefix])),
 
-  ?assertEqual(Expect, to_list(Bin)).
+  ?assertEqual(Expect, to_list(Bin)),
+  file:delete(FName).
 
 -endif.

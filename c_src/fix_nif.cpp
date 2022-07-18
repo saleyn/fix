@@ -29,18 +29,28 @@ static ERL_NIF_TERM am_badenv;
 static ERL_NIF_TERM am_binary;
 static ERL_NIF_TERM am_debug;
 static ERL_NIF_TERM am_delim;
+static ERL_NIF_TERM am_epoch_usec;
+static ERL_NIF_TERM am_epoch_msec;
+static ERL_NIF_TERM am_epoch_sec;
 static ERL_NIF_TERM am_float;
 static ERL_NIF_TERM am_full;
 static ERL_NIF_TERM am_local;
 static ERL_NIF_TERM am_ms;
+static ERL_NIF_TERM am_none;
+static ERL_NIF_TERM am_naive;
+static ERL_NIF_TERM am_number;
 static ERL_NIF_TERM am_offset;
 static ERL_NIF_TERM am_preserve;
 static ERL_NIF_TERM am_replace;
 static ERL_NIF_TERM am_sec;
+static ERL_NIF_TERM am_string;
 static ERL_NIF_TERM am_so_files;
+static ERL_NIF_TERM am_time;
 static ERL_NIF_TERM am_ts_type;
+static ERL_NIF_TERM am_tuple;
 static ERL_NIF_TERM am_us;
 static ERL_NIF_TERM am_utc;
+static ERL_NIF_TERM am_undefined_field;
 static ERL_NIF_TERM am_undefined_fix_variant;
 
 //------------------------------------------------------------------------------
@@ -66,9 +76,11 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   const ERL_NIF_TERM* pair;
   FixVariant*         var;
 
-  DoubleFmt           dbl_fmt = DoubleFmt::Double;
+  DoubleFmt           dbl_fmt  = DoubleFmt::Double;
+  TimeFmt             time_fmt = TimeFmt::EpochUSec;
 
-  if (argc < 2 || !enif_inspect_binary(env, argv[1], &input)) [[unlikely]]
+  if (argc < 2 || !enif_is_atom(env, argv[0])
+               || !enif_inspect_binary(env, argv[1], &input)) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
@@ -86,16 +98,40 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
           ret_binary = true;
         else if (enif_is_identical(head, am_full))
           full = true;
-        else if (enif_get_tuple(env, head, &arity, &pair) && arity == 2 &&
-                 enif_is_identical(pair[0], am_float))  {
-          if      (enif_is_identical(pair[1], am_binary))
-            dbl_fmt = DoubleFmt::Binary;
-          else if (enif_is_identical(pair[1], am_decimal))
-            dbl_fmt = DoubleFmt::Decimal;
-          else if (enif_is_identical(pair[1], am_float))
-            dbl_fmt = DoubleFmt::Double;
-          else [[unlikely]]
-            return enif_make_badarg(env);
+        else if (enif_get_tuple(env, head, &arity, &pair) && arity == 2) {
+          if (enif_is_identical(pair[0], am_float))  {
+            if      (enif_is_identical(pair[1], am_binary))
+              dbl_fmt = DoubleFmt::Binary;
+            else if (enif_is_identical(pair[1], am_string))
+              dbl_fmt = DoubleFmt::String;
+            else if (enif_is_identical(pair[1], am_decimal))
+              dbl_fmt = DoubleFmt::Decimal;
+            else if (enif_is_identical(pair[1], am_number))
+              dbl_fmt = DoubleFmt::Double;
+            else [[unlikely]]
+              return enif_raise_exception(env,
+                      enif_make_tuple2(env, am_badarg, am_float));
+          } else if (enif_is_identical(pair[0], am_time)) {
+            if      (enif_is_identical(pair[1], am_binary))
+              time_fmt = TimeFmt::Binary;
+            else if (enif_is_identical(pair[1], am_string))
+              time_fmt = TimeFmt::String;
+            else if (enif_is_identical(pair[1], am_epoch_usec))
+              time_fmt = TimeFmt::EpochUSec;
+            else if (enif_is_identical(pair[1], am_epoch_msec))
+              time_fmt = TimeFmt::EpochMSec;
+            else if (enif_is_identical(pair[1], am_epoch_sec))
+              time_fmt = TimeFmt::EpochSec;
+            else if (enif_is_identical(pair[1], am_tuple))
+              time_fmt = TimeFmt::Tuple;
+            else if (enif_is_identical(pair[1], am_naive))
+              time_fmt = TimeFmt::Naive;
+            else if (enif_is_identical(pair[1], am_none))
+              time_fmt = TimeFmt::None;
+            else [[unlikely]]
+              return enif_raise_exception(env,
+                      enif_make_tuple2(env, am_badarg, am_time));
+          }
         }
         else [[unlikely]]
           return enif_make_badarg(env);
@@ -108,7 +144,7 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   const auto* begin = input.data;
   const auto* end   = input.data + input.size;
 
-  return do_split(var, env, begin, end, ret_binary, full, dbl_fmt);
+  return do_split(var, env, begin, end, ret_binary, full, dbl_fmt, time_fmt);
 }
 
 // "is_name" is 0, if val is integer or binary encoded integer
@@ -136,7 +172,7 @@ field_meta_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   // Args must be:
   // (Variant::atom(), Name::atom()|binary()|integer())
-  if (argc != 2) [[unlikely]]
+  if (argc != 2 || !enif_is_atom(env, argv[0])) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
@@ -146,7 +182,7 @@ field_meta_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   auto field = var->field(env, argv[1]);
   if (!field)
-    return enif_make_badarg(env);
+    return enif_raise_exception(env, am_undefined_field);
 
   return field->meta(env);
 }
@@ -171,12 +207,12 @@ lookup_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   auto field = var->field(env, tag);
   if (!field)
-    return enif_make_badarg(env);
+    return enif_raise_exception(env, am_undefined_field);
 
   ErlNifBinary res;
   return field->atom_to_bin(env, val, res)
        ? enif_make_binary(env, &res)
-       : enif_raise_exception(env, am_badarg);
+       : enif_make_badarg(env);
 }
 
 // Convert (int()|binary()) -> atom():
@@ -193,14 +229,19 @@ tag_to_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   int         code;
 
   // Args must be: (Name::integer()|binary())
-  if (argc != 2 || !arg_code(var, env, argv[1], code, 0)) [[unlikely]]
+  if (argc != 2 || !enif_is_atom(env, argv[0])) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
     return enif_raise_exception(env, am_undefined_fix_variant);
 
-  // NOTE: This is guaranteed by the arg_code() call!
   assert(var);
+
+  if (!arg_code(var, env, argv[1], code, 0)) [[unlikely]]
+    return enif_raise_exception(env, am_undefined_field);
+
+
+  // NOTE: This is guaranteed by the arg_code() call!
   assert(code > 0 && code < var->field_count());
 
   auto field = var->field(code);
@@ -210,37 +251,64 @@ tag_to_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   return field->get_atom();
 }
 
-// Convert (atom()|binary()) -> integer()|binary()
-//   (<<"CheckSum">>, true)  -> <<"10">>
-//   (<<"CheckSum">>, false) -> 10
-//   ('CheckSum',     true)  -> <<"10">>
-//   ('CheckSum',     false) -> 10
+// Convert (Varient::atom(), Field::atom()|binary(), IsBin::boolean()) ->
+//    integer()|binary()
+// (<<"CheckSum">>, true) -> <<"10">>
+// (<<"CheckSum">>,false) -> 10
+// ('CheckSum',     true) -> <<"10">>
+// ('CheckSum',    false) -> 10
 static ERL_NIF_TERM
-field_to_tag_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+field_to_tag(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[], bool is_bin)
 {
   auto pers = get_pers(env);
   if (!pers) [[unlikely]]
     return enif_raise_exception(env, am_badenv);
 
   FixVariant* var;
-  int         code;
-  bool        is_bin = false;
 
   // Args must be:
-  // (Variant::atom(), Name::atom()|binary()) or (atom(), atom(), 'binary')
-  if ((argc == 3  && !(is_bin = enif_is_identical(am_binary, argv[2]))) ||
-      (argc != 2) || !arg_code(var, env, argv[1], code, true)) [[unlikely]]
+  // (Variant::atom(), Name::atom()|binary()) or (atom(), atom())
+  if (argc != 2 || !enif_is_atom(env, argv[0]))
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
     return enif_raise_exception(env, am_undefined_fix_variant);
 
-  return is_bin ? var->copy_bin_tag(env, code) : enif_make_int(env, code);
+  assert(var);
+
+  auto field = var->field(env, argv[1]);
+  if (!field)
+    return enif_raise_exception(env, am_undefined_field);
+
+  return is_bin ? var->copy_bin_tag(env, field->id())
+                : enif_make_int(env, field->id());
 }
 
-// Convert (Variant()::atom(), atom()|integer()|binary(), binary()) ->
-//           integer()|atom()|float()|binary()
-//   E.g. ('default', <<"35">>, <<"0">>) -> 'Heartbeat'
+// (Variant::atom(), FieldID::binary()|atom()) -> binary()
+// Convert (atom()|binary()) -> integer()|binary()
+//   (<<"CheckSum">>, binary)  -> <<"10">>
+//   (<<"CheckSum">>)          -> 10
+//   ('CheckSum',     true)  -> <<"10">>
+//   ('CheckSum',     false) -> 10
+static ERL_NIF_TERM
+field_to_tag_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  return field_to_tag(env, argc, argv, true);
+}
+// (Variant::atom(), FieldID::binary()|atom()) -> integer()
+static ERL_NIF_TERM
+field_to_bintag_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  return field_to_tag(env, argc, argv, false);
+}
+
+// Convert (Variant()::atom(), atom()|integer()|binary(), binary(),
+//           Format ::
+//             nil|                                       %% Default value
+//             number|decimal|                            %% Produce float fmt
+//             epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Produce time fmt
+//         ) -> integer()|atom()|float()|binary().
+//   E.g. ('default', <<"35">>, <<"0">>, nil) -> 'Heartbeat'
 static ERL_NIF_TERM
 decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
@@ -251,7 +319,9 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   FixVariant*  var;
   ErlNifBinary bin;
 
-  if (argc != 3 || !enif_inspect_binary(env, argv[2], &bin)) [[unlikely]]
+  if (argc != 4 || !enif_is_atom(env, argv[0])
+                || !enif_inspect_binary(env, argv[2], &bin)
+                || !enif_is_atom(env, argv[3])) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
@@ -261,9 +331,38 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   auto field = var->field(env, argv[1]);
   if (!field)
-    return enif_make_badarg(env);
+    return enif_raise_exception(env, am_undefined_field);
 
-  return field->decode(env, (const char*)bin.data, bin.size);
+  auto fmt = argv[3];
+
+  DoubleFmt num_fmt  = DoubleFmt::Decimal;
+  TimeFmt   time_fmt = TimeFmt::EpochUSec;
+
+  switch (field->dtype()) {
+    case DataType::DOUBLE:
+      if      (enif_is_identical(am_nil,     fmt)) break;
+      else if (enif_is_identical(am_number,  fmt)) num_fmt=DoubleFmt::Double;
+      else if (enif_is_identical(am_decimal, fmt)) num_fmt=DoubleFmt::Decimal;
+      else
+        return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
+      break;
+    case DataType::DATETIME:
+      if      (enif_is_identical(am_nil,        fmt)) break;
+      else if (enif_is_identical(am_epoch_usec, fmt)) time_fmt=TimeFmt::EpochUSec;
+      else if (enif_is_identical(am_epoch_msec, fmt)) time_fmt=TimeFmt::EpochMSec;
+      else if (enif_is_identical(am_epoch_sec,  fmt)) time_fmt=TimeFmt::EpochSec;
+      else if (enif_is_identical(am_naive,      fmt)) time_fmt=TimeFmt::Naive;
+      else if (enif_is_identical(am_tuple,      fmt)) time_fmt=TimeFmt::Tuple;
+      else
+        return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
+      break;
+    default:
+      if (!enif_is_identical(am_nil, fmt))
+        return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
+      break;
+  }
+
+  return field->decode(env, (const char*)bin.data, bin.size, num_fmt, time_fmt);
 }
 
 static ERL_NIF_TERM
@@ -275,7 +374,7 @@ encode_field_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   FixVariant* var;
 
-  if (argc != 3) [[unlikely]]
+  if (argc != 3 || !enif_is_atom(env, argv[0])) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
@@ -313,7 +412,7 @@ encode_fields_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
   FixVariant* var;
 
-  if (argc != 2 ||
+  if (argc != 2 || !enif_is_atom(env, argv[0]) ||
       !(enif_is_list(env, argv[1]) ||
         enif_is_empty_list(env, argv[1]))) [[unlikely]]
     return enif_make_badarg(env);
@@ -373,7 +472,8 @@ list_field_values_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   FixVariant* var;
   int         code;
 
-  if (argc != 2 || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
+  if (argc != 2 || !enif_is_atom(env, argv[0])
+                || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
@@ -412,8 +512,8 @@ list_fix_variants_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   std::vector<ERL_NIF_TERM> res;
   res.reserve(pers->count());
 
-  for (auto& v : pers->variants())
-    res.push_back(enif_make_atom(env, v.second->name().c_str()));
+  for (auto& [_,v] : pers->variants())
+    res.push_back(enif_make_tuple2(env, v->name_atom(), v->app_name_atom()));
 
   return enif_make_list_from_array(env, &res[0], res.size());
 }
@@ -861,18 +961,28 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     am_binary                = safe_make_atom(env, "binary");
     am_debug                 = safe_make_atom(env, "debug");
     am_delim                 = safe_make_atom(env, "delim");
+    am_epoch_usec            = safe_make_atom(env, "epoch_usec");
+    am_epoch_msec            = safe_make_atom(env, "epoch_msec");
+    am_epoch_sec             = safe_make_atom(env, "epoch_sec");
     am_float                 = safe_make_atom(env, "float");
     am_full                  = safe_make_atom(env, "full");
     am_local                 = safe_make_atom(env, "local");
     am_ms                    = safe_make_atom(env, "ms");
+    am_naive                 = safe_make_atom(env, "naive");
+    am_none                  = safe_make_atom(env, "none");
+    am_number                = safe_make_atom(env, "number");
     am_offset                = safe_make_atom(env, "offset");
     am_preserve              = safe_make_atom(env, "preserve");
     am_replace               = safe_make_atom(env, "replace");
     am_sec                   = safe_make_atom(env, "sec");
+    am_string                = safe_make_atom(env, "string");
     am_so_files              = safe_make_atom(env, "so_files");
     am_ts_type               = safe_make_atom(env, "ts_type");
+    am_time                  = safe_make_atom(env, "time");
+    am_tuple                 = safe_make_atom(env, "tuple");
     am_us                    = safe_make_atom(env, "us");
     am_utc                   = safe_make_atom(env, "utc");
+    am_undefined_field       = safe_make_atom(env, "undefined_field");
     am_undefined_fix_variant = safe_make_atom(env, "undefined_fix_variant");
   }
   catch (std::exception const& e) {
@@ -963,8 +1073,9 @@ static ErlNifFunc fix_nif_funcs[] =
   {"field_meta",            2, field_meta_nif},
   {"tag_to_field",          2, tag_to_field_nif},
   {"field_to_tag",          2, field_to_tag_nif},
+  {"field_to_bintag",       2, field_to_bintag_nif},
   {"lookup_field_value",    3, lookup_field_value_nif},
-  {"decode_field_value",    3, decode_field_value_nif},
+  {"decode_field_value",    4, decode_field_value_nif},
   {"encode_field",          3, encode_field_nif},
   {"encode_fields",         2, encode_fields_nif},
   {"list_field_values",     2, list_field_values_nif},

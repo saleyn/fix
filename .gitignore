@@ -1,4 +1,4 @@
 ebin
-priv
+priv/*.so
 .eunit
 _build

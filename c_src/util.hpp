@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <string.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <memory>
 #include <cstdint>
@@ -72,27 +73,37 @@
 // Static variables
 //------------------------------------------------------------------------------
 static ERL_NIF_TERM am_badarg;
+static ERL_NIF_TERM am_calendar;
+static ERL_NIF_TERM am_day;
 static ERL_NIF_TERM am_decimal;
-static ERL_NIF_TERM am_enomem;
-static ERL_NIF_TERM am_exception;
-static ERL_NIF_TERM am_error;
-static ERL_NIF_TERM am_false;
-static ERL_NIF_TERM am_fix;
 static ERL_NIF_TERM am_decode_error;
 static ERL_NIF_TERM am_encode_error;
+static ERL_NIF_TERM am_enomem;
+static ERL_NIF_TERM am_error;
+static ERL_NIF_TERM am_exception;
+static ERL_NIF_TERM am_false;
+static ERL_NIF_TERM am_fix;
 static ERL_NIF_TERM am_group;
+static ERL_NIF_TERM am_hour;
 static ERL_NIF_TERM am_magnitude;
 static ERL_NIF_TERM am_message;
+static ERL_NIF_TERM am_microsecond;
+static ERL_NIF_TERM am_minute;
+static ERL_NIF_TERM am_month;
 static ERL_NIF_TERM am_more;
+static ERL_NIF_TERM am_naive_calendar;
+static ERL_NIF_TERM am_naive_struct;
+static ERL_NIF_TERM am_nil;
+static ERL_NIF_TERM am_ok;
 static ERL_NIF_TERM am_pos;
 static ERL_NIF_TERM am_precision;
 static ERL_NIF_TERM am_reason;
+static ERL_NIF_TERM am_second;
 static ERL_NIF_TERM am_src;
 static ERL_NIF_TERM am_struct;
 static ERL_NIF_TERM am_tag;
-static ERL_NIF_TERM am_nil;
-static ERL_NIF_TERM am_ok;
 static ERL_NIF_TERM am_true;
+static ERL_NIF_TERM am_year;
 
 static const char SOH = 1;
 
@@ -199,7 +210,19 @@ static const char* type_to_string(FieldType val) {
 enum class DoubleFmt {
   Double,
   Decimal,
-  Binary
+  Binary,
+  String
+};
+
+enum class TimeFmt {
+  EpochUSec,
+  EpochMSec,
+  EpochSec,
+  Binary,
+  String,
+  Tuple,    // { {{Y,M,D},{HH,MM,SS}}, Microseconds }
+  Naive,    // Elixir's NaiveDataTime map
+  None
 };
 
 enum class TsType {
@@ -330,12 +353,14 @@ struct Field {
 
   // Decode field's value
   ERL_NIF_TERM decode(ErlNifEnv*, const char* val, int len,
-                      DoubleFmt fmt = DoubleFmt::Decimal) const;
+                      DoubleFmt dbl_fmt  = DoubleFmt::Decimal,
+                      TimeFmt   time_fmt = TimeFmt::EpochUSec) const;
 
   // Encode a value `val` of this field as binary stored in res as
   // `<<Tag/binary, 1, Value/binary, 1>>`. Return am_ok if all good or Erlang
   // exception on error.
   ERL_NIF_TERM encode(ErlNifEnv*, int& offset, ErlNifBinary& res, ERL_NIF_TERM val);
+
 private:
   using TermMap = std::unordered_map<ERL_NIF_TERM, ERL_NIF_TERM>;
   using NameMap = std::unordered_map<std::string_view, const FieldChoice*>;
@@ -350,7 +375,8 @@ private:
   int                        m_ch_len;
   int                        m_max_val_len;    // Max length of codes in 'choices'
   std::vector<FieldChoice>   m_choices;
-  const char*                m_len_field;      // Name of the length field for 'NUMINGROUP' and 'DATA' field types
+  const char*                m_len_field;      // Length field name for field types
+                                               // 'NUMINGROUP' and 'DATA'
   int                        m_len_field_id;   // ID of the length field
   DecFieldValFun             m_decf;
   TermMap                    m_atom_map;       // Maps atom name Name -> value Code
@@ -362,7 +388,8 @@ private:
 // Environment persistent across NIF calls
 //------------------------------------------------------------------------------
 struct Persistent {
-  using Map = std::unordered_map<ERL_NIF_TERM, std::unique_ptr<FixVariant>>;
+  using VariantStore = std::unordered_map<ERL_NIF_TERM, std::unique_ptr<FixVariant>>;
+  using IndexMap     = std::unordered_map<ERL_NIF_TERM, FixVariant*>;
 
   // Takes a vector of shared object files to load containing FIX variants
   Persistent
@@ -380,11 +407,12 @@ struct Persistent {
   int                 debug()           const { return m_debug;   }
   TsType              ts_type()         const { return m_ts_type; }
 
+  // Get the variant by either variant or application name
   FixVariant*         get(ERL_NIF_TERM);
   bool                get(ERL_NIF_TERM, FixVariant*& var);
 
-  size_t              count()           const { return m_variants.size(); }
-  Map const&          variants()        const { return m_variants;        }
+  size_t              count()           const { return m_var_storage.size(); }
+  VariantStore const& variants()        const { return m_var_storage;        }
 
   bool                load_fix_variant(const std::string& so_file,  bool replace);
   bool                unload_fix_variant(ERL_NIF_TERM variant_name, bool lock);
@@ -396,7 +424,8 @@ struct Persistent {
   }
 private:
   std::mutex          m_mutex;
-  Map                 m_variants;
+  VariantStore        m_var_storage;
+  IndexMap            m_variants;
   ErlNifEnv*          m_env;
   int                 m_debug;
   TsType              m_ts_type;
@@ -417,15 +446,18 @@ struct FixVariant {
 
   ~FixVariant();
 
-  int                 debug()     const { return m_pers->debug(); }
-  Persistent  const*  pers()      const { return m_pers;          }
+  int                 debug()         const { return m_pers->debug(); }
+  Persistent  const*  pers()          const { return m_pers;          }
 
-  std::string const&  name()      const { return m_name;          }
-  bool                is_elixir() const { return m_elixir;        }
-  std::string const&  so_path()   const { return m_so_path;       }
-  ErlNifEnv*          env()             { return m_pers->env();   }
-  ErlNifEnv const*    env()       const { return m_pers->env();   }
-  ERL_NIF_TERM        null()            { return ERL_NIF_TERM(0); }
+  std::string const&  name()          const { return m_name;          }
+  ERL_NIF_TERM        name_atom()     const { return m_name_am;       }
+  std::string const&  app_name()      const { return m_app_name;      }
+  ERL_NIF_TERM        app_name_atom() const { return m_app_name_am;   }
+  bool                is_elixir()     const { return m_elixir;        }
+  std::string const&  so_path()       const { return m_so_path;       }
+  ErlNifEnv*          env()                 { return m_pers->env();   }
+  ErlNifEnv const*    env()           const { return m_pers->env();   }
+  ERL_NIF_TERM        null()                { return ERL_NIF_TERM(0); }
 
   Field const*        field(unsigned tag) const;
   Field*              field(unsigned tag);
@@ -470,6 +502,9 @@ struct FixVariant {
 private:
   Persistent*           m_pers;
   std::string           m_name;
+  ERL_NIF_TERM          m_name_am;
+  std::string           m_app_name;
+  ERL_NIF_TERM          m_app_name_am;
   bool                  m_elixir;
   std::string           m_so_path;
   void*                 m_so_handle;
@@ -492,9 +527,9 @@ private:
 // Main FIX variant creation function
 //------------------------------------------------------------------------------
 
-extern "C"
-{
-  typedef const char* (*fix_variant_name_fun)();
+// Returns {VariantName, ApplicationName} tuple
+extern "C" {
+  typedef std::pair<const char*, const char*> (*fix_variant_name_fun)();
   typedef const char* (*fix_target_compiler_fun)();
   typedef std::vector<Field> (*fix_create_fields_fun)(FixVariant* pers);
 }
@@ -609,9 +644,10 @@ std::tuple<ERL_NIF_TERM, const char*, int>
 do_decode_value
 (
   const Field* field, ErlNifEnv* env,
-  const unsigned char*& p, const unsigned char* end,
-  DataType dtype, DoubleFmt  double_fmt, bool ret_binary, char soh,
-  int&     next_data_length
+  const unsigned char*& p,   const unsigned char* end,
+  DataType dtype, DoubleFmt  double_fmt, TimeFmt time_fmt,
+  bool ret_binary, char soh, int&     next_data_length,
+  const unsigned char* msg_begin = nullptr
 );
 
 namespace {
@@ -655,17 +691,18 @@ inline constexpr uint64_t hash_val(const char* s, int len) {
   return res;
 }
 
-inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool utc=true)
+inline bool decode_timestamp(tm& out, int& us, const char* p, size_t size, bool utc)
 {
-  int y, mon, d, h, m, s, us = 0;
+  int  y, mon, d, h=0, m=0, s=0;
+  bool res;
+
+  us = 0;
 
   auto parse = [p](int offset, int len, int &i)
   {
     auto b = p + offset;
     return str_to_int(b, b + len, i) != nullptr;
   };
-
-  auto res = true;
 
   switch (size)
   {
@@ -689,13 +726,10 @@ inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool
              parse(18,6, us);
       break;
     default:
-      res = false;
+      return false;
   }
 
-  if (!res) [[unlikely]]
-    return -1;
-
-  struct tm t = {
+  out = {
     .tm_sec  = s,
     .tm_min  = m,
     .tm_hour = h,
@@ -703,9 +737,18 @@ inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool
     .tm_mon  = mon  - 1,   // Months are between 0-11
     .tm_year = y - 1900,   // Years since 1900
   };
-  uint64_t epoch = utc ? timegm(&t) : mktime(&t);
 
-  return epoch * 1'000'000 + us;
+  return res;
+}
+
+inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool utc=true)
+{
+  struct tm t; int us;
+  if (!decode_timestamp(t, us, p, size, utc)) [[unlikely]]
+    return -1;
+
+  uint64_t epoch = utc ? timegm(&t) : mktime(&t);
+  return   epoch * 1'000'000 + us;
 }
 
 template <int N, typename Ch = char>
@@ -819,7 +862,7 @@ struct ParserState : public DataType {
 ERL_NIF_TERM
 do_split(FixVariant* fvar, ErlNifEnv* env,
          const unsigned char*& begin, const unsigned char* end,
-         bool ret_binary, bool full, DoubleFmt double_fmt);
+         bool ret_binary, bool full, DoubleFmt double_fmt, TimeFmt time_fmt);
 
 //------------------------------------------------------------------------------
 // Implementation
@@ -888,7 +931,7 @@ make_decode_error(
     char buf[128];
     auto len =
       snprintf(buf, sizeof(buf),
-               "Cannot decode FIX msg (tag=%d, pos=%ld): %s", tag, pos, error);
+               "Cannot decode FIX field (tag=%d, pos=%ld): %s", tag, pos, error);
 
     ERL_NIF_TERM keys[] = {
       am_exception,
@@ -1229,7 +1272,8 @@ inline ERL_NIF_TERM Field::decode_value(
 }
 
 inline ERL_NIF_TERM
-Field::decode(ErlNifEnv* env, const char* val, int len, DoubleFmt dfmt) const
+Field::decode(ErlNifEnv* env, const char* val, int len,
+              DoubleFmt dfmt, TimeFmt tfmt) const
 {
   int next_data_length = -1;
   const char       soh = '\0';
@@ -1237,7 +1281,7 @@ Field::decode(ErlNifEnv* env, const char* val, int len, DoubleFmt dfmt) const
 
   auto [value, err_str, err_line] =
     do_decode_value(this, env, p, p+len, m_dtype,
-                    dfmt, true, soh, next_data_length);
+                    dfmt, tfmt, true, soh, next_data_length);
 
   if (value == am_nil) [[unlikely]]
     return MAKE_DECODE_ERROR(variant(), env, err_str, 0, m_id, err_line);
@@ -1428,6 +1472,8 @@ Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
 }
 
 //------------------------------------------------------------------------------
+// Persistent
+//------------------------------------------------------------------------------
 inline Persistent::Persistent(std::vector<std::string> const& so_files,
                               int debug, TsType ts_type)
   : m_env(enif_alloc_env())
@@ -1446,28 +1492,38 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
     load_fix_variant(file, true);
   }
 
-  am_badarg       = make_atom("badarg");
-  am_decimal      = make_atom("decimal");
-  am_enomem       = make_atom("enomem");
-  am_exception    = make_atom("__exception__");
-  am_error        = make_atom("error");
-  am_false        = make_atom("false");
-  am_fix          = make_atom("fix");
-  am_decode_error = make_atom("Elixir.FIX.DecodeError");
-  am_encode_error = make_atom("Elixir.FIX.EncodeError");
-  am_group        = make_atom("group");
-  am_message      = make_atom("message");
-  am_magnitude    = make_atom("magnitude");
-  am_more         = make_atom("more");
-  am_pos          = make_atom("pos");
-  am_precision    = make_atom("precision");
-  am_reason       = make_atom("reason");
-  am_src          = make_atom("src");
-  am_struct       = make_atom("__struct__");
-  am_tag          = make_atom("tag");
-  am_nil          = make_atom("nil");
-  am_ok           = make_atom("ok");
-  am_true         = make_atom("true");
+  am_badarg         = make_atom("badarg");
+  am_calendar       = make_atom("calendar");
+  am_day            = make_atom("day");
+  am_decimal        = make_atom("decimal");
+  am_decode_error   = make_atom("Elixir.FIX.DecodeError");
+  am_encode_error   = make_atom("Elixir.FIX.EncodeError");
+  am_enomem         = make_atom("enomem");
+  am_error          = make_atom("error");
+  am_exception      = make_atom("__exception__");
+  am_false          = make_atom("false");
+  am_fix            = make_atom("fix");
+  am_group          = make_atom("group");
+  am_hour           = make_atom("hour");
+  am_magnitude      = make_atom("magnitude");
+  am_message        = make_atom("message");
+  am_microsecond    = make_atom("microsecond");
+  am_minute         = make_atom("minute");
+  am_month          = make_atom("month");
+  am_more           = make_atom("more");
+  am_naive_calendar = make_atom("Elixir.Calendar.ISO");
+  am_naive_struct   = make_atom("Elixir.NaiveDateTime");
+  am_nil            = make_atom("nil");
+  am_ok             = make_atom("ok");
+  am_pos            = make_atom("pos");
+  am_precision      = make_atom("precision");
+  am_reason         = make_atom("reason");
+  am_second         = make_atom("second");
+  am_src            = make_atom("src");
+  am_struct         = make_atom("__struct__");
+  am_tag            = make_atom("tag");
+  am_true           = make_atom("true");
+  am_year           = make_atom("year");
 }
 
 inline Persistent::~Persistent()
@@ -1482,11 +1538,16 @@ inline bool Persistent::load_fix_variant(const std::string& so_file, bool replac
   std::unique_lock<std::mutex> lock(m_mutex);
 
   try {
-    auto p      = new FixVariant(this, so_file, replace);
-    auto guardp = guard(p);
+    auto p        = new FixVariant(this, so_file, replace);
+    auto guardp   = guard(p);
 
-    auto var = enif_make_atom(m_env, p->name().c_str());
-    m_variants.emplace(std::make_pair(var, std::unique_ptr<FixVariant>(p)));
+    // Insert the FixVariant instance into storage
+    m_var_storage.emplace(
+      std::make_pair(p->name_atom(),std::unique_ptr<FixVariant>(p)));
+
+    // Add indices
+    m_variants.emplace(std::make_pair(p->name_atom(),     p)); // Idx by variant
+    m_variants.emplace(std::make_pair(p->app_name_atom(), p)); // Idx by app_name
 
     guardp.release(); // This doesn't delete the pointer
 
@@ -1504,11 +1565,16 @@ inline bool Persistent::unload_fix_variant(ERL_NIF_TERM variant_name, bool lock)
   if (lock)
     guard.lock();
 
-  auto it    = m_variants.find(variant_name);
-  auto found = it != m_variants.end();
+  auto it    = m_var_storage.find(variant_name);
+  auto found = it != m_var_storage.end();
 
-  if (found)
-    m_variants.erase(it);
+  if (found) {
+    auto   p = it->second.get();
+    assert(p);
+    m_variants.erase(p->name_atom());
+    m_variants.erase(p->app_name_atom());
+    m_var_storage.erase(it);
+  }
 
   return found;
 }
@@ -1523,7 +1589,7 @@ FixVariant* Persistent::get(ERL_NIF_TERM variant)
   assert(enif_is_atom(m_env, variant));
 
   auto   it = m_variants.find(variant);
-  return IS_UNLIKELY(it == m_variants.end()) ? nullptr : it->second.get();
+  return IS_UNLIKELY(it == m_variants.end()) ? nullptr : it->second;
 }
 
 bool Persistent::get(ERL_NIF_TERM var_name, FixVariant*& var_ptr)
@@ -1567,10 +1633,10 @@ inline FixVariant
     return sym;
   };
 
-  auto get_variant_name = [&find_fun](const char* fun) {
+  auto get_variant_and_app_names = [&find_fun](const char* fun) {
     auto   f = reinterpret_cast<fix_variant_name_fun>(find_fun(fun));
     assert(f);
-    return std::string(f());
+    return f();
   };
 
   auto is_elixir = [&find_fun](const char* fun) {
@@ -1585,15 +1651,26 @@ inline FixVariant
     return (factory)(this);
   };
 
-  m_name   = get_variant_name("fix_variant_name");
-  auto am  = enif_make_atom(pers->env(), m_name.c_str());
+  auto names    = get_variant_and_app_names("fix_variant_name");
 
-  if (m_pers->get(am) != nullptr) {
+  if (names.first  == 0 || names.first[0] == '\0')
+    throw std::runtime_error("Empty FIX variant in file: " + so_file);
+  if (names.second == 0 || names.second[0] == '\0')
+    throw std::runtime_error("Empty FIX variant app name in file: " + so_file);
+
+  m_name        = names.first;
+  m_app_name    = names.second;
+
+  m_name_am     = enif_make_atom(pers->env(), m_name.c_str());
+  m_app_name_am = enif_make_atom(pers->env(), m_app_name.c_str());
+
+  if (m_pers->get(m_name_am) != nullptr) {
     if (replace)
-      m_pers->unload_fix_variant(am, false);
+      m_pers->unload_fix_variant(m_name_am, false);
     else {
       DBGPRINT(m_pers->debug(), 1,
-               "FIX: variant '%s' already loaded", m_name.c_str());
+               "FIX: variant '%s' (app=%s) already loaded",
+               m_name.c_str(), m_app_name.c_str());
       dlclose(m_so_handle);
       m_so_handle = nullptr;
       throw NonUniqueVariant(m_name);
@@ -1603,15 +1680,13 @@ inline FixVariant
   m_elixir = is_elixir("fix_target_compiler");
   m_fields = get_fields("fix_create_fields");
 
-  if (m_name.size() == 0)
-    throw std::runtime_error("Empty FIX variant in file: " + so_file);
   if (m_fields.size() == 0)
     throw std::runtime_error
       ("FIX variant '"+m_name+"' doesn't have any field definitions: "+so_file);
 
   DBGPRINT(m_pers->debug(), 1,
-      "FIX: initializing variant '%s' with %lu fields from: %s (type=%s)",
-      m_name.c_str(), m_fields.size(), so_file.c_str(),
+      "FIX: initializing variant '%s' (app=%s) with %lu fields from: %s (type=%s)",
+      m_name.c_str(), m_app_name.c_str(), m_fields.size(), so_file.c_str(),
       replace ? "replace" : "preserve");
 
   m_bins.resize(0);
@@ -1737,15 +1812,14 @@ do_decode_value
 (
   const Field*      field, ErlNifEnv*           env,
   const unsigned char*& p, const unsigned char* end,
-  DataType          dtype, DoubleFmt     double_fmt,
+  DataType          dtype, DoubleFmt     double_fmt, TimeFmt time_fmt,
   bool         ret_binary, char                 soh,
-  int&   next_data_length
+  int&   next_data_length, const unsigned char* msg_begin
 )
 {
   assert(field);
 
-  auto begin = p;
-  auto ptr   = p;
+  auto ptr = p;
 
   ERL_NIF_TERM value = am_nil;
 
@@ -1754,7 +1828,7 @@ do_decode_value
       long ival=0;
       p = str_to_int(ptr, end, ival, soh);
       if (p == nullptr) [[unlikely]]
-        return std::make_tuple(am_nil, "expecing integer", __LINE__);
+        return std::make_tuple(am_nil, "expecting integer", __LINE__);
 
       // Field number 9 is special, as it indicates the length of the FIX
       // message payload, so treat it as integer
@@ -1790,22 +1864,33 @@ do_decode_value
         }
       }
 
-      if (double_fmt == DoubleFmt::Binary || i > 19) {
-        auto sz   = p - ptr;
-        auto data = enif_make_new_binary(env, sz, &value);
+      if (i > 19) [[unlikely]]
+        double_fmt = DoubleFmt::Binary;
 
-        if (!data) [[unlikely]]
-          return std::make_tuple(am_nil, "out of memory", __LINE__);
+      switch (double_fmt) {
+        case DoubleFmt::Binary: {
+          auto sz   = p - ptr;
+          auto data = enif_make_new_binary(env, sz, &value);
 
-        memcpy(data, ptr, sz);
-        break;
-      } else if (double_fmt == DoubleFmt::Decimal) {
-        value = enif_make_tuple3(env, am_decimal,
-                  enif_make_long(env, n), enif_make_long(env, i - tmp));
-      } else {
-        ASSERT(double_fmt == DoubleFmt::Double, begin, end);
-        double res = double(mant) + (mant < 0 ? -frac : +frac);
-        value      = enif_make_double(env, res);
+          if (!data) [[unlikely]]
+            return std::make_tuple(am_nil, "out of memory", __LINE__);
+
+          memcpy(data, ptr, sz);
+          break;
+        }
+        case DoubleFmt::Decimal:
+          value = enif_make_tuple3(env, am_decimal,
+                    enif_make_long(env, n), enif_make_long(env, i - tmp));
+          break;
+        case DoubleFmt::String:
+          value = enif_make_string_len(env, (const char*)ptr, p-ptr, ERL_NIF_LATIN1);
+          break;
+        case DoubleFmt::Double:
+        default: {
+          double res = double(mant) + (mant < 0 ? -frac : +frac);
+          value      = enif_make_double(env, res);
+          break;
+        }
       }
 
       break;
@@ -1843,7 +1928,7 @@ do_decode_value
         memcpy(data, ptr, len);
       } else {
         value = enif_make_tuple2(env,
-                                  enif_make_uint(env, ptr-begin),
+                                  enif_make_uint(env, ptr-msg_begin),
                                   enif_make_uint(env, len));
       }
       break;
@@ -1864,7 +1949,7 @@ do_decode_value
       auto def = [=]() {
         return ret_binary ? create_binary(env, ptr, p-ptr)
                           : enif_make_tuple2(env,
-                              enif_make_uint(env, ptr-begin),
+                              enif_make_uint(env, ptr-msg_begin),
                               enif_make_uint(env, p-ptr));
       };
 
@@ -1881,13 +1966,93 @@ do_decode_value
       if (!check_end(p, end, soh)) [[unlikely]]
         return std::make_tuple(am_nil, "missing datatime soh", __LINE__);
 
-      auto len = p - ptr;
-      auto ts  = decode_timestamp(env, reinterpret_cast<const char*>(ptr), len);
+      auto    len = p - ptr;
+      auto    q   = reinterpret_cast<const char*>(ptr);
+      int64_t ts  = 0;
+
+      switch (time_fmt) {
+        case TimeFmt::Binary:
+          value = create_binary(env, ptr, len);
+          break;
+        case TimeFmt::String:
+          value = enif_make_string_len(env, q, len, ERL_NIF_LATIN1);
+          break;
+        case TimeFmt::EpochUSec:
+          ts    = decode_timestamp(env, q, len);
+          value = enif_make_int64(env, ts);
+          break;
+        case TimeFmt::EpochMSec:
+          ts    = decode_timestamp(env, q, len);
+          value = enif_make_int64(env, ts / 1000);
+          break;
+        case TimeFmt::EpochSec:
+          ts    = decode_timestamp(env, q, len);
+          value = enif_make_int64(env, ts / 1'000'000);
+          break;
+        case TimeFmt::Naive: {
+          tm t; int us;
+          if (!decode_timestamp(t, us, q, len, true)) {
+            ts = -1;
+            break;
+          }
+          ERL_NIF_TERM keys[] = {
+            am_struct,
+            am_calendar,
+            am_year,
+            am_month,
+            am_day,
+            am_hour,
+            am_minute,
+            am_second,
+            am_microsecond,
+          };
+          ERL_NIF_TERM values[] = {
+            am_naive_struct,
+            am_naive_calendar,
+            enif_make_int(env, t.tm_year+1900),
+            enif_make_int(env, t.tm_mon+1),
+            enif_make_int(env, t.tm_mday),
+            enif_make_int(env, t.tm_hour),
+            enif_make_int(env, t.tm_min),
+            enif_make_int(env, t.tm_sec),
+            enif_make_tuple2(env, enif_make_int(env, us),
+                                  enif_make_int(env, 6)),
+          };
+          if (!enif_make_map_from_arrays(
+              env, keys, values, std::extent<decltype(keys)>::value, &value))
+            return std::make_tuple(am_nil, "cannot create naive datetime map", __LINE__);
+          break;
+        }
+        case TimeFmt::Tuple: {
+          tm t; int us;
+          if (!decode_timestamp(t, us, q, len, true))
+            ts = -1;
+          else
+            value = enif_make_tuple2(env,
+                      enif_make_tuple2(env,
+                        enif_make_tuple3(env,
+                          enif_make_int(env, t.tm_year+1900),
+                          enif_make_int(env, t.tm_mon+1),
+                          enif_make_int(env, t.tm_mday)
+                        ),
+                        enif_make_tuple3(env,
+                          enif_make_int(env, t.tm_hour),
+                          enif_make_int(env, t.tm_min),
+                          enif_make_int(env, t.tm_sec)
+                        )
+                      ),
+                      enif_make_int(env, us));
+          break;
+        }
+        case TimeFmt::None:
+        default:
+          value = enif_make_tuple2(env, ptr-msg_begin, p-ptr);
+          break;
+      }
 
       if (ts < 0) [[unlikely]]
         return std::make_tuple(am_nil, "invalid datetime value", __LINE__);
 
-      value = enif_make_int64(env, ts);
       break;
     }
 
@@ -1922,7 +2087,7 @@ do_decode_value
 inline ERL_NIF_TERM
 do_split(FixVariant* fvar, ErlNifEnv* env,
          const unsigned char*&  begin,  const unsigned char* end,
-         bool  ret_binary, bool full, DoubleFmt double_fmt)
+         bool  ret_binary, bool full, DoubleFmt double_fmt, TimeFmt time_fmt)
 {
   const auto len = int(end - begin);
 
@@ -2000,7 +2165,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
   // Add {Tag::atom(),  Val::any(), TagCode::integer(),
   //         {ValOffset::integer(), ValLen ::integer()}}
-  auto append = [=, &reply, &reply_size]
+  auto append = [=, &reply, &reply_size, &val_begin, &val_end]
     (ERL_NIF_TERM tag, int code, ERL_NIF_TERM val)
   {
     // Don't include 'BeginString', 'BodyLength', 'CheckSum' when not requested
@@ -2061,7 +2226,8 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
 
     auto [value, err_str, err_line] =
       do_decode_value(field, env, p, end, DataType(state),
-                      double_fmt, ret_binary, soh, next_data_length);
+                      double_fmt, time_fmt, ret_binary, soh, next_data_length,
+                      begin);
 
     if (value == am_nil) [[unlikely]]
       return MAKE_DECODE_ERROR(fvar, env, err_str, ptr - begin, code, err_line);

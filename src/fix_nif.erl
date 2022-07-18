@@ -10,11 +10,11 @@
 
 -on_load(init_nif/0).
 
--export([load_fix_variant/1, load_fix_variant/2, unload_fix_variant/1]).
--export([list_fix_variants/0]).
--export([split/2, split/3, tag_to_field/2, field_to_tag/2, field_meta/2]).
+-export([load_variant/1, load_variant/2, unload_variant/1, list_variants/0]).
+-export([split/2, split/3]).
+-export([tag_to_field/2, field_to_tag/2, field_to_bintag/2, field_meta/2]).
 -export([bin_to_integer/1, bin_to_integer/2]).
--export([lookup_field_value/3, decode_field_value/3]).
+-export([lookup_field_value/3, decode_field_value/3, decode_field_value/4]).
 -export([encode_fields/2, encode_field/3]).
 -export([list_field_values/2]).
 -export([decode_timestamp/1, decode_timestamp/2]).
@@ -27,7 +27,32 @@
 -include_lib("kernel/include/logger.hrl").
 
 -type decoded_message() :: list({atom(), integer() | binary() | atom()}).
--export_type([decoded_message/0]).
+
+-type decode_options() :: [
+  binary |
+  full   |
+  {float, binary|string|number|decimal} |
+  {time,  binary|string|epoch_usec|epoc_msec|epoch_sec|naive|tuple|none}
+].
+%% Options for splitting a FIX message
+%% <dl>
+%% <dt>binary</dt>
+%%   <dd>Return string fix fields as binaries. Default: tuple `{Pos,Len}'.</dd>
+%% <dt>`full'</dt>
+%%   <dd>In addition to header and body FIX fields, include `BeginString',
+%%      `BodyLength', and `CheckSum'.</dd>
+%% <dt>`{float, FloatFmt}'</dt>
+%%   <dd>Format floats as `binary', `string', `number' (float value), `decimal'
+%%       (tuple `{decimal, Magnitude::integer(), Precision::integer()}').</dd>
+%% <dt>`{time, TimeFmt}'</dt>
+%%   <dd>Format time as `binary', `string', `epoch_usec' (microseconds since
+%%       epoch), `epoch_msec' (milliseconds since epoch), `epoch_sec' (seconds
+%%       since epoch), `naive' (Elixir's NaiveDateTime map), `tuple' (tuple
+%%       `{{{Y,M,D},{HH,MM,SS}}, USec}'), `none' (tuple `{Pos,Len}' offset/len
+%%       part within the FIX message).</dd>
+%% </dl>
+
+-export_type([decoded_message/0, decode_options/0]).
 
 -compile({parse_transform,  etran}).  % Use parse transforms from etran library
 
@@ -66,8 +91,7 @@ split(_Variant, _Binary) ->
 
 %% @doc Parse FIX binary message.
 %% If `Options' list has the `binary' atom, then return string fields as binaries.
--spec split(atom(), binary(), Options::[binary | full | {delim,char()}]) ->
-        decoded_message().
+-spec split(atom(), binary(), Options::decode_options()) -> decoded_message().
 split(_Variant, _Binary, _Options) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
@@ -81,6 +105,10 @@ tag_to_field(_Variant, _Field) ->
 
 -spec field_to_tag(atom(), atom()|binary()) -> integer().
 field_to_tag(_Variant, _Field) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+-spec field_to_bintag(atom(), atom()|binary()) -> binary().
+field_to_bintag(_Variant, _Field) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
 -spec encode_fields(atom(), [{atom()|binary()|string()|integer(), atom()|binary()}]) -> binary().
@@ -98,7 +126,15 @@ lookup_field_value(_Variant, _Field, _Value) ->
 
 -spec decode_field_value(atom(), atom()|binary()|string()|integer(), binary()) ->
         atom()|binary().
-decode_field_value(_Variant, _Field, _Value) ->
+decode_field_value(Variant, Field, Value) ->
+  decode_field_value(Variant, Field, Value, nil).
+
+-spec decode_field_value(atom(), atom()|binary()|string()|integer(), binary(),
+        nil|                                       %% Default value decoding
+        number|decimal|                            %% Alternative float decoding
+        epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Alternative time decoding
+      ) -> atom()|binary().
+decode_field_value(_Variant, _Field, _Value, _Format) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
 -spec list_field_values(atom(), atom()|binary()|string()|integer()) ->
@@ -108,19 +144,57 @@ list_field_values(_Variant, _Field) ->
 
 %% @doc Load a given FIX variant shared object file.
 %% Returns false if the variant name is already loaded.
--spec load_fix_variant(binary()|string()) -> boolean().
-load_fix_variant(SoFile) -> load_fix_variant(SoFile, preserve).
+-spec load_variant(binary()|string()) -> boolean().
+load_variant(SoFile) ->
+  load_variant(SoFile, preserve).
 
 %% @doc Load a given FIX variant shared object file.
+%% If first argument is an application name than
 %% If `Action' is `replace', the variant is replaced when it's already loaded.
 %% If `Action' is `preserve', the existing variant is not reloaded.
+-spec load_variant(atom()|binary()|string(), replace|preserve) -> boolean().
+load_variant(AppName, Action) when is_atom(AppName) ->
+  case application:load(AppName) of
+    ok -> ok;
+    {error, {already_loaded, AppName}} -> ok;
+    {error, E} ->
+      error("Cannot find ~s application: ~p", [atom_to_list(AppName), E])
+  end,
+  case code:priv_dir(AppName) of
+    Dir when is_list(Dir) ->
+      SoNameWild = filename:join(Dir, "fix_variant_*.so"),
+      case filelib:wildcard(filename:join(Dir, "fix_variant_*.so")) of
+        [SoName] ->
+          load_fix_variant(SoName, Action);
+        [] ->
+          erlang:error("Cannot find " ++ atom_to_list(AppName) ++
+                       " variant implementation in " ++ SoNameWild);
+        [_|_] ->
+          erlang:error("Non unique " ++ atom_to_list(AppName) ++
+                       " variant implementation found in " ++ SoNameWild)
+      end;
+    _ ->
+      erlang:error("Application " ++ atom_to_list(AppName) ++ " not found")
+  end;
+load_variant(SoFile, Action) when is_list(SoFile); is_binary(SoFile) ->
+  load_fix_variant(SoFile, Action).
+
 -spec load_fix_variant(binary()|string(), replace|preserve) -> boolean().
-load_fix_variant(_SoFile, _Action) ->
+load_fix_variant(SoFile, _Action) when is_list(SoFile); is_binary(SoFile) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+-spec unload_variant(atom()) -> boolean().
+unload_variant(VariantName) when is_atom(VariantName) ->
+  unload_fix_variant(VariantName).
 
 -spec unload_fix_variant(atom()) -> boolean().
 unload_fix_variant(_VariantName) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
+%% @doc Get all loaded FIX variants
+-spec list_variants() -> [#{variant => atom(), app => atom()}].
+list_variants() ->
+  [#{variant => V, app => A} || {V,A} <- list_fix_variants()].
 
 -spec list_fix_variants() -> [{atom(), binary()}].
 list_fix_variants() ->

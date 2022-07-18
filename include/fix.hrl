@@ -3,9 +3,9 @@
 -define(SOH, 1).
 
 -record(fix, {
-  msgtype       :: atom(),  %% Message type
-  header = #{}  :: map(),   %% Optional message header
-  fields = #{}  :: map()    %% Message fields
+  msgtype       :: atom(),    %% Message type
+  header = #{}  :: map(),     %% Optional message header
+  fields = #{}  :: map()      %% Message fields
 }).
 
 -record(meta, {
