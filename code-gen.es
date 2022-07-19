@@ -514,7 +514,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "init(Replace) when Replace==replace; Replace==preserve ->\n"
     "  VarName = filename:join(code:priv_dir(", FN3, "), \"",
       add_variant_suffix("fix_variant", State), ".so\"),\n"
-    "  fix_nif:load_fix_variant(VarName, Replace).\n\n"
+    "  fix_nif:load_variant(VarName, Replace).\n\n"
     "%% @doc Get field's metadata\n"
     "-spec field(integer()|atom()) ->\n"
     "  [{id,integer()}|{name,atom()}|{data_type,atom()}|{type,atom()}|\n"
