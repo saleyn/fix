@@ -693,7 +693,7 @@ inline constexpr uint64_t hash_val(const char* s, int len) {
 
 inline bool decode_timestamp(tm& out, int& us, const char* p, size_t size, bool utc)
 {
-  int  y, mon, d, h=0, m=0, s=0;
+  int  y=0, mon=0, d=0, h=0, m=0, s=0;
   bool res;
 
   us = 0;
