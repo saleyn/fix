@@ -48,24 +48,14 @@ Writing file: ./src/fix_groups_cme.erl
 This generated code can be integrated in another application specific to the
 given FIX variant.  The generated and compiled shared object `fix_variant_cme.so`
 contains field decoding definitions and is loaded by the `fix` application using
-either the following configuration:
+either the following call:
 
-```
-{fix, [
-  {fix_variants, [default,cme]},
-  {fix_so_paths, "/path/to/variants/priv"}
-]}
+```erlang
+1> fix_nif:load_fix_variant(Variant|AppName).
 ```
 The `default` FIX variant is the one included in the `fix` project based on the
 `spec/FIX44.xml` template.  The `fix_so_paths` can contain multiple paths that
 are `:` delimited.
-
-Alternatively the names of the variants to be loaded can be specified by the
-environment variables:
-```
-export FIX_VARIANTS="default:cme"
-export FIX_SO_PATHS="/path/to/fix_variant_cme.so:/other/fix_variant_ice.so"
-```
 
 The NIF library of the `fix` project will load all `fix_variant*.so` shared
 objects for each FIX variant requested.
@@ -86,14 +76,41 @@ parse both formats.
 
 Decoding FIX messages:
 ```
-2> rr(fix_util).  % Read record definitions for pretty printing
-3> {ok, BinRest, {MatchedFldCount, Header, Msg, UnparsedFields}} = fix_util:decode(<<"8=FIX.4.4|9=58|35=0|49=Sender|56=Target|34=1|52=20220306-06:39:29.387565|10=079|">>, [binary]).
-4> {Header, Msg}.
-{#header{fields = #{'BeginString' => undefined,'BodyLength' => undefined,
-                    'LastMsgSeqNumProcessed' => undefined,'MsgSeqNum' => 1,
-                    'MsgType' => 'Heartbeat','PossDupFlag' => false,
-                    'PossResend' => false,'SenderCompID' => <<"Sender">>,
-                    'SendingTime' => 1646548769387565,
-                    'TargetCompID' => <<"Target">>}},
-#'Heartbeat'{fields = #{}}}
+2> {ok, BinRest, {MatchedFldCount, Header, Msg, UnparsedFields}} = fix_util:decode(<<"8=FIX.4.4|9=58|35=0|49=Sender|56=Target|34=1|52=20220306-06:39:29.387565|10=079|">>, [binary]).
+4> Header.
+#{'BeginString' => undefined,'BodyLength' => undefined,
+  'LastMsgSeqNumProcessed' => undefined,'MsgSeqNum' => 1,
+  'MsgType' => 'Heartbeat','PossDupFlag' => false,
+  'PossResend' => false,'SenderCompID' => <<"Sender">>,
+  'SendingTime' => 1646548769387565,
+  'TargetCompID' => <<"Target">>}
+5> Msg.
+#{}
+```
+
+## FIX printer
+
+A `fixdump` script is provided for printing content of files produced by `fix_logger`.
+
+```erlang
+# Display help screen
+$ _build/default/bin/fixdump -h
+
+# Print decoded file
+$ _build/default/bin/fixdump -f log/20210102-fix1.log
+
+────────────────────────────────────────────────────────────────────
+00000779: 20210614-23:07:19.534 FIX1 <- Kraken: Logon
+──No─┬───Tag─┬─Field─────────────────────┬─Decoded Value────────────
+  01 │    35 │ MsgType                   │ Logon
+  02 │    34 │ MsgSeqNum                 │ 1
+  03 │    49 │ SenderCompID              │ Coinbase
+  04 │    52 │ SendingTime               │ 20220714-23:07:18.135
+  05 │    56 │ TargetCompID              │ 8YVU3rvC0LMI8OoReNk=
+  06 │    96 │ RawData                   │ 4eZGzeWjpnIVJ5nReNk=
+  07 │    98 │ EncryptMethod             │ NONE
+  08 │   108 │ HeartBtInt                │ 10
+  09 │   554 │ Password                  │ <secret>
+  10 │  8013 │ CancelOrdersOnDisconnect  │ SESSION
+  11 │  9406 │ DropCopyFlag              │ false 
 ```
