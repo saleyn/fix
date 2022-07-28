@@ -664,9 +664,10 @@ log_test() ->
   DTime   = {{2022,1,2}, {3,4,5}},
   Prefix  = "|SRC:DST|",
   DirFun  = fun
-              (in)  -> "I|";
-              (out) -> "O|";
-              (_)   -> " |"
+              (in)    -> "I|";
+              (out)   -> "O|";
+              (error) -> "E|";
+              (_)     -> " |"
             end,
   Opts    = #{rotate  => none, utc => true,
               prefix  => Prefix, dir_fun => DirFun,
@@ -677,7 +678,8 @@ log_test() ->
 
   Logger  = fix_logger:start_link(flt, tmp_app, var, "TMP", Filenm, Opts),
   Now     = erlang:universaltime_to_posixtime(DTime)*1000,
-  fix_logger:log(flt, out, "Test\n", [], Now),
+  fix_logger:log(flt, out,   "Test1\n", [], Now),
+  fix_logger:log(flt, error, "Test2\n", [], Now),
   FN = fix_logger:filename(flt),
   fix_logger:close(flt),
 
@@ -688,8 +690,11 @@ log_test() ->
   {ok, Bin} = file:read_file(FN),
   Expect    = lists:flatten(io_lib:format(
     "## FIX log: exchange=TMP, variant=var, app=tmp_app: ~w~.2.0w~.2.0w\n\n"
-    "~w~.2.0w~.2.0w-~.2.0w:~.2.0w:~.2.0w.000~sO|Test\n",
-    [Y,M,D,Y,M,D,HH,MM,SS, Prefix])),
+    "~w~.2.0w~.2.0w-~.2.0w:~.2.0w:~.2.0w.000~sO|Test1\n"
+    "~w~.2.0w~.2.0w-~.2.0w:~.2.0w:~.2.0w.000~sE|Test2\n",
+    [Y,M,D,
+     Y,M,D,HH,MM,SS, Prefix,
+     Y,M,D,HH,MM,SS, Prefix])),
 
   ?assertEqual(Expect, to_list(Bin)),
   file:delete(FName).
