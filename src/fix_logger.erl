@@ -39,7 +39,8 @@
 
 -define(FILE_OPTS, [append, raw, binary, {delayed_write, 4096, 500}]).
 
--type vars()    :: [{atom, list()|binary()}].
+-type vars()      :: [{atom, list()|binary()}].
+-type direction() :: in|out|error|undefined.
 
 -type options() :: #{
   xchg       => binary(),
@@ -49,7 +50,7 @@
   logpfx     => binary(),
   vars       => vars(),
   on_new     => on_new(),
-  dir_fun    => fun((in|out|undefined) -> binary()|list()),
+  dir_fun    => fun((direction()) -> binary()|list()),
   rotate     => date|{size, Sz::integer()}|none,
   keep_files => N::integer(),
   utc        => boolean()
@@ -79,9 +80,9 @@
 %%       `vars' option.
 %%   </dd>
 %% <dt>`dir_fun'</dt>
-%%   <dd>Direction-formatting function `fun(in|out|undefined) -> string()'.
+%%   <dd>Direction-formatting function `fun(in|out|error|undefined) -> string()'.
 %%       By default the direction is printed as: `" <- "' for `in', `" -> "'
-%%       for `out', and `"    "' for `undefined'.
+%%       for `out', and `"    "' for `undefined', and `" !! "' for error.
 %%   </dd>
 %% <dt>`rotate'</dt>
 %%   <dd>Rotate logs by `date' or by file size `{size, Sz::integer()}'</dd>
@@ -92,7 +93,7 @@
 
 -type on_new() ::
   fun((Filename::string()) -> ignore|string()|binary())|ignore|string()|binary().
--type dir_fun() :: fun((in|out|undefined) -> string()).
+-type dir_fun() :: fun((direction()) -> string()).
 
 -record(state, {
   fd,                                           %% term(), file descriptor
@@ -165,14 +166,14 @@ filename(Logger) ->
 %% @doc Save `Data' to log file. The call is asynchronous.
 %% @end
 %%------------------------------------------------------------------------------
--spec log(pid(), in|out|undefined|string(),
+-spec log(pid(), direction()|string(),
           list()|binary()|fun(() -> list()|binary())) -> ok.
 log(Logger, Dir, Data) when is_atom(Dir) ->
   log2(Logger, {op(Data), now(), direction(Dir), Data});
 log(Logger, Fmt, Args) when is_list(Fmt), is_list(Args) ->
   log2(Logger, {log, now(), undefined, Fmt, Args}).
 
--spec log(pid(), in|out|undefined,
+-spec log(pid(), direction(),
           list()|binary()|
           list() | fun((list()) -> list()|binary()),
           list()) -> ok.
@@ -185,7 +186,7 @@ log(Logger, Dir, Fmt, Args) when is_list(Fmt), is_list(Args) ->
 %% @doc Save result of `io_lib:format(Fmt, Args)' to file.
 %% @end
 %%------------------------------------------------------------------------------
--spec log(pid()|atom(), in|out|undefined, string(),list(), MS::integer()) -> ok.
+-spec log(pid()|atom(), direction(), string(),list(), MS::integer()) -> ok.
 log(Logger, Dir, Fmt, Args, Now) ->
     log2(Logger, {log, now(Now), direction(Dir), Fmt, Args}).
 
@@ -440,9 +441,7 @@ op(Data) when is_list(Data)       -> log;
 op(Data) when is_binary(Data)     -> log;
 op(Data) when is_function(Data,0) -> log_fun.
 
-direction(in)        -> in;
-direction(out)       -> out;
-direction(undefined) -> undefined.
+direction(I) when I==in; I==out; I==error; I==undefined -> I.
 
 now(undefined)  -> undefined;
 now(T) when is_integer(T), T > 1577836800000 -> T.  %% 2020-01-01
@@ -452,9 +451,10 @@ now() -> erlang:system_time(millisecond).
 
 dir(undefined, Dir) ->
   case Dir of
-    in  -> " <- ";
-    out -> " -> ";
-    _   -> "    "
+    in    -> " <- ";
+    out   -> " -> ";
+    error -> " !! ";
+    _     -> "    "
   end;
 dir(F, Dir) when is_function(F, 1) ->
   F(Dir).
@@ -465,7 +465,7 @@ dir(F, Dir) when is_function(F, 1) ->
 %% @end
 %%------------------------------------------------------------------------------
 -spec log_to_file(#state{}, TimeWithMsec::integer(),
-                  in|out|undefined, file:io_data()) ->
+                  direction(), file:io_data()) ->
         NewState::#state{}.
 log_to_file(State, Now, Dir, Data) ->
   case maybe_open_file(State, Now) of
