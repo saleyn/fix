@@ -305,7 +305,7 @@ field_to_bintag_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 // Convert (Variant()::atom(), atom()|integer()|binary(), binary(),
 //           Format ::
 //             nil|                                       %% Default value
-//             number|decimal|                            %% Produce float fmt
+//             number|decimal|string|binary|              %% Produce float fmt
 //             epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Produce time fmt
 //         ) -> integer()|atom()|float()|binary().
 //   E.g. ('default', <<"35">>, <<"0">>, nil) -> 'Heartbeat'
@@ -341,8 +341,10 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   switch (field->dtype()) {
     case DataType::DOUBLE:
       if      (enif_is_identical(am_nil,     fmt)) break;
-      else if (enif_is_identical(am_number,  fmt)) num_fmt=DoubleFmt::Double;
       else if (enif_is_identical(am_decimal, fmt)) num_fmt=DoubleFmt::Decimal;
+      else if (enif_is_identical(am_number,  fmt)) num_fmt=DoubleFmt::Double;
+      else if (enif_is_identical(am_string,  fmt)) num_fmt=DoubleFmt::String;
+      else if (enif_is_identical(am_binary,  fmt)) num_fmt=DoubleFmt::Binary;
       else
         return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
       break;

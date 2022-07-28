@@ -1845,18 +1845,18 @@ do_decode_value
     }
 
     case DataType::DOUBLE: {
-      long n=0, sign=1, i=0;
+      long n=0, sign=1, i=0, tmp=0, max_len=19;
 
       if (p < end && *p == '-') [[unlikely]] {
-        sign = -1;  ++p;
+        sign = -1;
+        tmp = ++i;
+        ++max_len;
+        ++p;
       }
 
       for(; p < end && *p >= '0' && *p <= '9'; ++p, ++i)
         n = n*10 + (*p - '0');
 
-      n = sign * n;
-
-      long   tmp  = i;
       double mant = n, frac = 0, coeff = 1.0;
 
       if (p != end) {
@@ -1870,7 +1870,9 @@ do_decode_value
         }
       }
 
-      if (i > 19) [[unlikely]]
+      n = sign * n;
+
+      if (i > max_len) [[unlikely]]
         double_fmt = DoubleFmt::Binary;
 
       switch (double_fmt) {
@@ -1893,7 +1895,7 @@ do_decode_value
           break;
         case DoubleFmt::Double:
         default: {
-          double res = double(mant) + (mant < 0 ? -frac : +frac);
+          double res = double(mant*sign) + (sign < 0 ? -frac : +frac);
           value      = enif_make_double(env, res);
           break;
         }

@@ -131,7 +131,7 @@ decode_field_value(Variant, Field, Value) ->
 
 -spec decode_field_value(atom(), atom()|binary()|string()|integer(), binary(),
         nil|                                       %% Default value decoding
-        number|decimal|                            %% Alternative float decoding
+        number|decimal|string|binary|              %% Alternative float decoding
         epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Alternative time decoding
       ) -> atom()|binary().
 decode_field_value(_Variant, _Field, _Value, _Format) ->
