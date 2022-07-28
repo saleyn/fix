@@ -1845,10 +1845,16 @@ do_decode_value
     }
 
     case DataType::DOUBLE: {
-      long n=0, i=0;
+      long n=0, sign=1, i=0;
+
+      if (p < end && *p == '-') [[unlikely]] {
+        sign = -1;  ++p;
+      }
 
       for(; p < end && *p >= '0' && *p <= '9'; ++p, ++i)
         n = n*10 + (*p - '0');
+
+      n = sign * n;
 
       long   tmp  = i;
       double mant = n, frac = 0, coeff = 1.0;
