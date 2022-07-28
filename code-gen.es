@@ -723,48 +723,6 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
       [{"is_app_msg(_)", " -> false.\n"}])
   ]),
 
-  if State#state.elixir ->
-    {_Msg0, _Type0, _Cat0, _HFields} = Header,
-    %ReqFlds = [get_attr(name, A) || {_FldOrGrp, A, _} <- HFields, get_attr(required, A)],
-
-    FN3 = add_variant_suffix("fix_structs.ex", State),
-    ok  = write_file(elixir, src, State, FN3, [], [
-      "defmodule FIX.EncodeError do\n"
-      "  defexception [:tag, :message, :src]\n"
-      "\n"
-      "  def message(e), do: e.message\n"
-      "end\n"
-      "\n"
-      "defmodule FIX.DecodeError do\n"
-      "  defexception [:tag, :message, :pos, :reason, :src]\n"
-      "\n"
-      "  def message(e), do: e.message\n"
-      "end\n"
-      %"\n"
-      %lists:map(fun({Enum, _Descr}) ->
-      %  try
-      %    {Msg, _Type, Category, Fields} = get_msg_info(Enum, Messages),
-      %    [
-      %      "defmodule FIX.", atom_to_list(Msg), " do\n"
-      %      "  @moduledoc \"", iif(Category==admin, "Admin", "Application"),
-      %      " ", atom_to_list(Msg), " message\"\n"
-      %      "  defstruct [\n",
-      %      align_table(
-      %        [{"    "++atom_to_list(get_attr(name, A))++": ", "nil,\n"}
-      %          || {_Tag, A, _} <- Fields, get_attr(required, A) == true]
-      %      ),
-      %      "  ]\n"
-      %      "end\n\n"
-      %    ]
-      %  catch _:_ ->
-      %    []
-      %  end
-      %end, MsgTypes)
-    ]);
-  true ->
-    ok
-  end,
-
   FNm  = add_variant_suffix("fix_decoder", State),
   ok   = write_file(erlang, src, State, FNm ++ ".erl", [],
   [

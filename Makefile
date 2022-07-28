@@ -6,6 +6,9 @@ all:
 test:
 	rebar3 eunit --verbose
 
+escript:
+	rebar3 escriptize
+
 generate:
 	./code-gen.es -f spec/FIX44.xml
 
