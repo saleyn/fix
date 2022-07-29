@@ -303,11 +303,12 @@ field_to_bintag_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 }
 
 // Convert (Variant()::atom(), atom()|integer()|binary(), binary(),
-//           Format ::
-//             nil|                                       %% Default value
-//             number|decimal|string|binary|              %% Produce float fmt
-//             epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Produce time fmt
-//         ) -> integer()|atom()|float()|binary().
+//           Format :: [opt()]|opt()) -> integer()|atom()|float()|binary().
+//   Where opt() ->
+//          nil|                                       %% Default value
+//          number|decimal|string|binary|              %% Produce float fmt
+//          epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Produce time fmt
+//
 //   E.g. ('default', <<"35">>, <<"0">>, nil) -> 'Heartbeat'
 static ERL_NIF_TERM
 decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
@@ -320,8 +321,7 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   ErlNifBinary bin;
 
   if (argc != 4 || !enif_is_atom(env, argv[0])
-                || !enif_inspect_binary(env, argv[2], &bin)
-                || !enif_is_atom(env, argv[3])) [[unlikely]]
+                || !enif_inspect_binary(env, argv[2], &bin)) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
@@ -333,36 +333,56 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   if (!field)
     return enif_raise_exception(env, am_undefined_field);
 
-  auto fmt = argv[3];
-
   DoubleFmt num_fmt  = DoubleFmt::Decimal;
   TimeFmt   time_fmt = TimeFmt::EpochUSec;
 
-  switch (field->dtype()) {
-    case DataType::DOUBLE:
-      if      (enif_is_identical(am_nil,     fmt)) break;
-      else if (enif_is_identical(am_decimal, fmt)) num_fmt=DoubleFmt::Decimal;
-      else if (enif_is_identical(am_number,  fmt)) num_fmt=DoubleFmt::Double;
-      else if (enif_is_identical(am_string,  fmt)) num_fmt=DoubleFmt::String;
-      else if (enif_is_identical(am_binary,  fmt)) num_fmt=DoubleFmt::Binary;
-      else
-        return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
-      break;
-    case DataType::DATETIME:
-      if      (enif_is_identical(am_nil,        fmt)) break;
-      else if (enif_is_identical(am_epoch_usec, fmt)) time_fmt=TimeFmt::EpochUSec;
-      else if (enif_is_identical(am_epoch_msec, fmt)) time_fmt=TimeFmt::EpochMSec;
-      else if (enif_is_identical(am_epoch_sec,  fmt)) time_fmt=TimeFmt::EpochSec;
-      else if (enif_is_identical(am_naive,      fmt)) time_fmt=TimeFmt::Naive;
-      else if (enif_is_identical(am_tuple,      fmt)) time_fmt=TimeFmt::Tuple;
-      else
-        return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
-      break;
-    default:
-      if (!enif_is_identical(am_nil, fmt))
-        return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, fmt));
-      break;
+  auto set_opt = [&, field](auto fmt) {
+    switch (field->dtype()) {
+      case DataType::DOUBLE:
+        if      (enif_is_identical(am_nil,     fmt)) break;
+        else if (enif_is_identical(am_decimal, fmt)) num_fmt=DoubleFmt::Decimal;
+        else if (enif_is_identical(am_number,  fmt)) num_fmt=DoubleFmt::Double;
+        else if (enif_is_identical(am_string,  fmt)) num_fmt=DoubleFmt::String;
+        else if (enif_is_identical(am_binary,  fmt)) num_fmt=DoubleFmt::Binary;
+        else
+          return false;
+        break;
+      case DataType::DATETIME:
+        if      (enif_is_identical(am_nil,        fmt)) break;
+        else if (enif_is_identical(am_epoch_usec, fmt)) time_fmt=TimeFmt::EpochUSec;
+        else if (enif_is_identical(am_epoch_msec, fmt)) time_fmt=TimeFmt::EpochMSec;
+        else if (enif_is_identical(am_epoch_sec,  fmt)) time_fmt=TimeFmt::EpochSec;
+        else if (enif_is_identical(am_naive,      fmt)) time_fmt=TimeFmt::Naive;
+        else if (enif_is_identical(am_tuple,      fmt)) time_fmt=TimeFmt::Tuple;
+        else
+          return false;
+        break;
+      default:
+        if (!enif_is_identical(am_nil, fmt))
+          return false;
+        break;
+    }
+    return true;
+  };
+
+  auto opt = argv[3];
+  bool res = false;
+
+  if (enif_is_empty_list(env, opt))
+    res = true;
+  else if (enif_is_atom(env, opt))
+    res = set_opt(opt);
+  else if (enif_is_list(env, opt)) {
+    ERL_NIF_TERM head, list = opt;
+    while (enif_get_list_cell(env, list, &head, &list))
+      if (!set_opt(head))
+        goto END;
+    res = true;
   }
+
+END:
+  if (!res) [[unlikely]]
+    return enif_raise_exception(env, enif_make_tuple2(env, am_badarg, opt));
 
   return field->decode(env, (const char*)bin.data, bin.size, num_fmt, time_fmt);
 }
