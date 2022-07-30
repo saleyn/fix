@@ -4,6 +4,7 @@
 
 defmodule FIX.EncodeError do
   @moduledoc "FIX exception indicating an encoding error"
+  @dialyzer :no_undefined_callbacks
 
   defexception [:tag, :message, :src]
 
@@ -12,6 +13,7 @@ end
 
 defmodule FIX.DecodeError do
   @moduledoc "FIX exception indicating an decoding error"
+  @dialyzer :no_undefined_callbacks
 
   defexception [:tag, :message, :pos, :reason, :src]
 

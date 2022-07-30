@@ -32,8 +32,7 @@ now() ->
 timestamp() ->
   fix_nif:encode_timestamp(now()).
 
--spec timestamp(non_neg_integer() | {calendar:date(), {0..23, 0..59, 0..59, non_neg_integer()}}) ->
-  string().
+-spec timestamp(non_neg_integer()) -> binary().
 timestamp(EpochUSecs) when is_integer(EpochUSecs) ->
   fix_nif:encode_timestamp(EpochUSecs).
 
@@ -136,10 +135,10 @@ try_encode_next_group(_Mod, _ID, _DelimFld, []) ->
 
 encode_group(Mod, {K,V,It}) ->
   [encode_field(Mod, K, V) | encode_group(Mod, It)];
-encode_group(_, none) ->
-  [];
 encode_group(Mod, L) when is_list(L) ->
-  [encode_field(Mod, K, I) || {K,I} <- L].
+  [encode_field(Mod, K, I) || {K,I} <- L];
+encode_group(_, _) ->
+  [].
 
 encode_tagval(ID, V)        -> encode_tagval(ID, V, true).
 encode_tagval(ID, V, true)  -> [integer_to_binary(ID), $=, V, ?SOH];
@@ -147,7 +146,7 @@ encode_tagval(ID, V, false) -> [integer_to_binary(ID), $=, V].
 
 encode_field(Mod, ID, Val) when is_atom(ID) ->
   case Mod:field_tag(ID) of
-    {_Num, _Type, false} -> encode_tagval(ID, Val, true);
+    {Num,  _Type, false} -> encode_tagval(Num, Val, true);
     {_Num, _Type, Fun}   -> Fun(Val)
   end.
 

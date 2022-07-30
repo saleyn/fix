@@ -62,7 +62,57 @@ inline Persistent* get_pers(ErlNifEnv* env)
   return static_cast<Persistent*>(enif_priv_data(env));
 }
 
-/// Args: (binary(), [binary])
+/// Parse format options for numeric and time data types
+inline bool
+parse_format_opts(ERL_NIF_TERM opt, ERL_NIF_TERM val, DoubleFmt& df, TimeFmt& tf)
+{
+  if (enif_is_identical(opt, am_float)) {
+    if      (enif_is_identical(am_nil,        val)) return true;
+    else if (enif_is_identical(am_decimal,    val)) df=DoubleFmt::Decimal;
+    else if (enif_is_identical(am_number,     val)) df=DoubleFmt::Double;
+    else if (enif_is_identical(am_binary,     val)) df=DoubleFmt::Binary;
+    else if (enif_is_identical(am_string,     val)) df=DoubleFmt::String;
+    else [[unlikely]]
+      return false;
+  }
+  else if (enif_is_identical(opt, am_time)) {
+    if      (enif_is_identical(am_nil,        val)) return true;
+    else if (enif_is_identical(am_epoch_usec, val)) tf=TimeFmt::EpochUSec;
+    else if (enif_is_identical(am_epoch_msec, val)) tf=TimeFmt::EpochMSec;
+    else if (enif_is_identical(am_epoch_sec,  val)) tf=TimeFmt::EpochSec;
+    else if (enif_is_identical(am_naive,      val)) tf=TimeFmt::Naive;
+    else if (enif_is_identical(am_tuple,      val)) tf=TimeFmt::Tuple;
+    else if (enif_is_identical(am_binary,     val)) tf=TimeFmt::Binary;
+    else if (enif_is_identical(am_string,     val)) tf=TimeFmt::String;
+    else if (enif_is_identical(am_none,       val)) tf=TimeFmt::None;
+    else [[unlikely]]
+      return false;
+  }
+  else [[unlikely]]
+    return false;
+
+  return true;
+}
+
+/// Parse format options for decoding numeric and time data types.
+///
+/// Valid `tup` options are:
+/// `{float, nil|decimal|number|binary|string}` |
+/// `{time,  nil|epoch_usec|epoch_msec|epoch_sec|naive|tuple|binary|string|none}`
+inline bool
+parse_format_opts(ErlNifEnv* env, ERL_NIF_TERM tup, DoubleFmt& df, TimeFmt& tf)
+{
+  int                 arity;
+  const ERL_NIF_TERM* pair;
+
+  if (!enif_get_tuple(env, tup, &arity, &pair) || arity != 2) [[unlikely]]
+    return false;
+
+  return parse_format_opts(pair[0], pair[1], df, tf);
+}
+
+/// See above for valid `split_options()`.
+/// Args: (binary(), split_options())
 static ERL_NIF_TERM
 split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
@@ -73,11 +123,9 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   ErlNifBinary        input;
   bool  ret_binary  = false;
   bool  full        = false; // Include 'BeginString', 'BodyLength', 'CheckSum'?
-  const ERL_NIF_TERM* pair;
   FixVariant*         var;
-
-  DoubleFmt           dbl_fmt  = DoubleFmt::Double;
-  TimeFmt             time_fmt = TimeFmt::EpochUSec;
+  DoubleFmt           df = DoubleFmt::Double;
+  TimeFmt             tf = TimeFmt::EpochUSec;
 
   if (argc < 2 || !enif_is_atom(env, argv[0])
                || !enif_inspect_binary(env, argv[1], &input)) [[unlikely]]
@@ -91,50 +139,15 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
       if (!enif_is_list(env, argv[2])) [[unlikely]]
         return enif_make_badarg(env);
 
-      ERL_NIF_TERM  head, list = argv[2];
+      ERL_NIF_TERM head, list = argv[2];
       while (enif_get_list_cell(env, list, &head, &list)) {
-        int arity;
         if (enif_is_identical(head, am_binary))
           ret_binary = true;
         else if (enif_is_identical(head, am_full))
           full = true;
-        else if (enif_get_tuple(env, head, &arity, &pair) && arity == 2) {
-          if (enif_is_identical(pair[0], am_float))  {
-            if      (enif_is_identical(pair[1], am_binary))
-              dbl_fmt = DoubleFmt::Binary;
-            else if (enif_is_identical(pair[1], am_string))
-              dbl_fmt = DoubleFmt::String;
-            else if (enif_is_identical(pair[1], am_decimal))
-              dbl_fmt = DoubleFmt::Decimal;
-            else if (enif_is_identical(pair[1], am_number))
-              dbl_fmt = DoubleFmt::Double;
-            else [[unlikely]]
-              return enif_raise_exception(env,
-                      enif_make_tuple2(env, am_badarg, am_float));
-          } else if (enif_is_identical(pair[0], am_time)) {
-            if      (enif_is_identical(pair[1], am_binary))
-              time_fmt = TimeFmt::Binary;
-            else if (enif_is_identical(pair[1], am_string))
-              time_fmt = TimeFmt::String;
-            else if (enif_is_identical(pair[1], am_epoch_usec))
-              time_fmt = TimeFmt::EpochUSec;
-            else if (enif_is_identical(pair[1], am_epoch_msec))
-              time_fmt = TimeFmt::EpochMSec;
-            else if (enif_is_identical(pair[1], am_epoch_sec))
-              time_fmt = TimeFmt::EpochSec;
-            else if (enif_is_identical(pair[1], am_tuple))
-              time_fmt = TimeFmt::Tuple;
-            else if (enif_is_identical(pair[1], am_naive))
-              time_fmt = TimeFmt::Naive;
-            else if (enif_is_identical(pair[1], am_none))
-              time_fmt = TimeFmt::None;
-            else [[unlikely]]
-              return enif_raise_exception(env,
-                      enif_make_tuple2(env, am_badarg, am_time));
-          }
-        }
-        else [[unlikely]]
-          return enif_make_badarg(env);
+        else if (!parse_format_opts(env, head, df, tf)) [[unlikely]]
+          return enif_raise_exception(env,
+                  enif_make_tuple2(env, am_badarg, head));
       }
     }
   }
@@ -144,7 +157,7 @@ split_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   const auto* begin = input.data;
   const auto* end   = input.data + input.size;
 
-  return do_split(var, env, begin, end, ret_binary, full, dbl_fmt, time_fmt);
+  return do_split(var, env, begin, end, ret_binary, full, df, tf);
 }
 
 // "is_name" is 0, if val is integer or binary encoded integer
@@ -333,50 +346,31 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   if (!field)
     return enif_raise_exception(env, am_undefined_field);
 
-  DoubleFmt num_fmt  = DoubleFmt::Decimal;
-  TimeFmt   time_fmt = TimeFmt::EpochUSec;
+  DoubleFmt    num_fmt  = DoubleFmt::Decimal;
+  TimeFmt      time_fmt = TimeFmt::EpochUSec;
 
-  auto set_opt = [&, field](auto fmt) {
+  auto field_dtype = [field](ERL_NIF_TERM& dt) {
     switch (field->dtype()) {
-      case DataType::DOUBLE:
-        if      (enif_is_identical(am_nil,     fmt)) break;
-        else if (enif_is_identical(am_decimal, fmt)) num_fmt=DoubleFmt::Decimal;
-        else if (enif_is_identical(am_number,  fmt)) num_fmt=DoubleFmt::Double;
-        else if (enif_is_identical(am_string,  fmt)) num_fmt=DoubleFmt::String;
-        else if (enif_is_identical(am_binary,  fmt)) num_fmt=DoubleFmt::Binary;
-        else
-          return false;
-        break;
-      case DataType::DATETIME:
-        if      (enif_is_identical(am_nil,        fmt)) break;
-        else if (enif_is_identical(am_epoch_usec, fmt)) time_fmt=TimeFmt::EpochUSec;
-        else if (enif_is_identical(am_epoch_msec, fmt)) time_fmt=TimeFmt::EpochMSec;
-        else if (enif_is_identical(am_epoch_sec,  fmt)) time_fmt=TimeFmt::EpochSec;
-        else if (enif_is_identical(am_naive,      fmt)) time_fmt=TimeFmt::Naive;
-        else if (enif_is_identical(am_tuple,      fmt)) time_fmt=TimeFmt::Tuple;
-        else
-          return false;
-        break;
-      default:
-        if (!enif_is_identical(am_nil, fmt))
-          return false;
-        break;
+      case DataType::DOUBLE:    dt = am_float; return true;
+      case DataType::DATETIME:  dt = am_time;  return true;
+      default:                                 return false;
     }
-    return true;
   };
 
-  auto opt = argv[3];
-  bool res = false;
+  ERL_NIF_TERM dt;
+  auto   opt = argv[3];
+  bool   res = false;
 
-  if (enif_is_empty_list(env, opt))
+  if (enif_is_empty_list(env, opt) || enif_is_atom(env, am_nil))
     res = true;
-  else if (enif_is_atom(env, opt))
-    res = set_opt(opt);
+  else if (enif_is_atom(env, opt) && field_dtype(dt))
+    res = parse_format_opts(dt, opt, num_fmt, time_fmt);
   else if (enif_is_list(env, opt)) {
     ERL_NIF_TERM head, list = opt;
-    while (enif_get_list_cell(env, list, &head, &list))
-      if (!set_opt(head))
+    while (enif_get_list_cell(env, list, &head, &list)) {
+      if (!parse_format_opts(env, head, num_fmt, time_fmt)) [[unlikely]]
         goto END;
+    }
     res = true;
   }
 

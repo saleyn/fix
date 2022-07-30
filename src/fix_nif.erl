@@ -26,13 +26,14 @@
 -include("fix.hrl").
 -include_lib("kernel/include/logger.hrl").
 
--type decoded_message() :: list({atom(), integer() | binary() | atom()}).
-
--type decode_options() :: [
+-type decoded_message() ::
+  list({atom(), integer() | binary() | atom() | {integer(), integer()}, integer(), {integer(), integer()}}).
+-type split_message()   :: {ok, integer(), decoded_message()} | {more, integer()} | no_return().
+-type decode_options()  :: [
   binary |
   full   |
-  {float, binary|string|number|decimal} |
-  {time,  binary|string|epoch_usec|epoc_msec|epoch_sec|naive|tuple|none}
+  {float, binary|string|number|decimal|nil} |
+  {time,  binary|string|epoch_usec|epoc_msec|epoch_sec|naive|tuple|none|nil}
 ].
 %% Options for splitting a FIX message
 %% <dl>
@@ -91,7 +92,7 @@ split(_Variant, _Binary) ->
 
 %% @doc Parse FIX binary message.
 %% If `Options' list has the `binary' atom, then return string fields as binaries.
--spec split(atom(), binary(), Options::decode_options()) -> decoded_message().
+-spec split(atom(), binary(), Options::decode_options()) -> split_message().
 split(_Variant, _Binary, _Options) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
@@ -144,7 +145,7 @@ list_field_values(_Variant, _Field) ->
 
 %% @doc Load a given FIX variant shared object file.
 %% Returns false if the variant name is already loaded.
--spec load_variant(binary()|string()) -> boolean().
+-spec load_variant(binary()|string()|atom()) -> boolean().
 load_variant(SoFile) ->
   load_variant(SoFile, preserve).
 
@@ -196,7 +197,7 @@ unload_fix_variant(_VariantName) ->
 list_variants() ->
   [#{variant => V, app => A} || {V,A} <- list_fix_variants()].
 
--spec list_fix_variants() -> [{atom(), binary()}].
+-spec list_fix_variants() -> [{Variant::atom(), AppName::atom()}].
 list_fix_variants() ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 

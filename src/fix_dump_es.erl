@@ -48,16 +48,3 @@ try_add_path(Path, Config) ->
       io:format(standard_error, "File ~s contains bad path: ~p\n", [Config, Path]),
       halt(1)
   end.
-
-replace_home(Path, Home) ->
-  case re:run(Path,
-      "(?|(?:\\$\\$)|(?:~[^/$]*)|(?:\\${[A-Za-z][A-Za-z_0-9]*})|(?:\\$[A-Za-z][A-Za-z_0-9]*))",
-      [global, {capture, all}])
-  of
-    {match, List} ->
-      lists:foldl(fun([{Pos,Len}], P) ->
-        string:substr(P, 1, Pos) ++ Home ++ string:substr(P, Pos+1+Len)
-      end, Path, List);
-    nomatch ->
-      Path
-  end.

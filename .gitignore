@@ -2,3 +2,5 @@ ebin
 priv/*.so
 .eunit
 _build
+deps
+rebarconfig.json

@@ -5,7 +5,7 @@
 -module(fix).
 
 -export([split/2, split/3, tag_to_field/2, field_to_tag/2]).
--export([decode_field_value/3, encode_field_value/3, list_field_values/2]).
+-export([decode_field_value/3, encode_field/3, encode_fields/2, list_field_values/2]).
 
 
 -ifdef(TEST).
@@ -16,8 +16,8 @@
 split(FixVariant, Bin) ->
   fix_nif:split(FixVariant, Bin).
 
--spec split(binary(), Options::[binary | full | {delim,char()}]) ->
-  fix_nif:decoded_message().
+-spec split(atom(), binary(), Options::[binary | full | {delim,char()}]) ->
+  fix_nif:split_message().
 split(FixVariant, Bin, Opts) ->
   fix_nif:split(FixVariant, Bin, Opts).
 
@@ -27,11 +27,13 @@ tag_to_field(FixVariant, Field) ->
 field_to_tag(FixVariant, Field) ->
   fix_nif:field_to_tag(FixVariant, Field).
 
--spec encode_field_value(atom(), atom()|integer(),
-        binary()|boolean()|atom()|float()|integer()|
-        {decimal,Mantissa::integer(),Precision::integer()}) -> binary().
-encode_field_value(FixVariant, Field, Value) ->
-  fix_nif:encode_field_value(FixVariant, Field, Value).
+-spec encode_field(atom(), atom()|binary()|string()|integer(), atom()) -> binary().
+encode_field(FixVariant, Field, Value) ->
+  fix_nif:encode_field(FixVariant, Field, Value).
+
+-spec encode_fields(atom(), [{atom()|binary()|string()|integer(), atom()|binary()}]) -> binary().
+encode_fields(FixVariant, Fields) when is_list(Fields) ->
+  fix_nif:encode_fields(FixVariant, Fields).
 
 decode_field_value(FixVariant, Field, Value) ->
   fix_nif:decode_field_value(FixVariant, Field, Value).

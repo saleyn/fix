@@ -39,16 +39,6 @@ load_paths() ->
       ok
   end.
 
-app_load([]) -> ok;
-app_load([A|T]) ->
-  case application:load(A) of
-    ok                          -> app_load(T);
-    {error, {already_loaded,A}} -> app_load(T);
-    {error, Reason} ->
-      io:format(standard_error, "Cannot load application ~w: ~p\n", [A, Reason]),
-      halt(1)
-  end.
-
 try_add_path(Path, Config, Home) ->
   Path1 = replace_home(Path, Home),
   case filelib:is_dir(Path1) of

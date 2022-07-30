@@ -99,7 +99,7 @@
   fd,                                           %% term(), file descriptor
   prefix=""     :: string(),                    %% Prefix for logged messages
   logpfx        :: string(),                    %% Prefix for the logger:*/2
-  fname         :: string(),                    %% file name
+  fname         :: string()|undefined,          %% file name
   fname_mask    :: string(),                    %% file name source mask
   %% Execute this fun or write to file on creating a new file
   on_new        :: on_new(),
@@ -240,9 +240,6 @@ archive(FileMask, ZipFile, FromTS, UTC, Bindings)
 %% @end
 %% @private
 %%------------------------------------------------------------------------------
--spec init(map()) ->
-        {ok, #state{}} | {ok, #state{}, Timeout::integer()} | ignore |
-        {stop, Reason :: any()}.
 init(Opts) ->
   try
     File    = to_list(maps:get(filename, Opts)),
@@ -305,7 +302,7 @@ init(Opts) ->
                 prefix=Pfx,      logpfx=LogPfx, xchg=Xchg,   variant=Var}}
   catch throw:Err:ST ->
     Error = "Error starting logger: " ++ Err,
-    erlang:raise(error, Error, ST)
+    {stop, {Error, ST}}
   end.
 
 %%------------------------------------------------------------------------------

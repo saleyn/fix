@@ -617,7 +617,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  encode_msg(Mode, Body).\n"
     "\n"
     "encode_msg(native, Body) ->\n"
-    "  ?FIX_DECODER_MODULE:encode_msg(Body, ?FIX_BEGIN_STR);\n"
+    "  ?FIX_ENCODER_MODULE:encode_msg(Body, ?FIX_BEGIN_STR);\n"
     "\n"
     "encode_msg(nif, Body0) ->\n"
     "  Body1   = encode_msg_nif(Body0),\n"
@@ -690,7 +690,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
       io_lib:format("\n~smsg_meta(~w) ->\n  #{\n    type   => \"~s\",\n    kind   => ~w,\n    fields => #{\n~s\n    }\n  };\n",
         [iif(Descr=="", "", ["%% ", Descr, "\n"]), Msg, Type, Cat, Fun(0, Fields)])
     end, MsgTypes),
-    "msg_meta(M) -> erlang:raise(\"Unknown message \" ++ atom_to_list(M)).\n\n",
+    "msg_meta(M) -> erlang:error(\"Unknown message \" ++ atom_to_list(M)).\n\n",
 
     align_table(
       lists:map(fun({Enum, _Descr}) ->
@@ -701,7 +701,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
           <<"">>
         end
       end, MsgTypes) ++
-      [{"msg_meta_by_value(S)", " -> erlang:raise(\"Unknown message '\" ++ S ++ \"'\").\n"}]
+      [{"msg_meta_by_value(S)", " -> erlang:error(\"Unknown message '\" ++ S ++ \"'\").\n"}]
     ),
     "\n",
 

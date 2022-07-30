@@ -951,7 +951,7 @@ make_decode_error(
       reason,
       enif_make_long(env, tag),
       enif_make_long(env, pos),
-      create_binary (env, error),
+      enif_make_atom(env, error),
       create_binary (env, err_loc)
     };
 
@@ -1973,7 +1973,7 @@ do_decode_value
       while (p < end && *p != soh) ++p;
 
       if (!check_end(p, end, soh)) [[unlikely]]
-        return std::make_tuple(am_nil, "missing datatime soh", __LINE__);
+        return std::make_tuple(am_nil, "missing field delimiter", __LINE__);
 
       auto    len = p - ptr;
       auto    q   = reinterpret_cast<const char*>(ptr);
@@ -2087,7 +2087,8 @@ do_decode_value
   }
 
   if (!check_end(p, end, soh)) [[unlikely]]
-    return std::make_tuple(am_nil, "invalid value of missing soh", __LINE__);
+    return std::make_tuple(am_nil,
+            p < end ? "invalid value" : "missing field delimiter", __LINE__);
 
   return std::make_tuple(value, "", __LINE__);
 }
@@ -2193,7 +2194,7 @@ do_split(FixVariant* fvar, ErlNifEnv* env,
       code = 0;
       p    = str_to_int(ptr, end, code, '=');
       if (!p)
-        return MAKE_DECODE_ERROR(fvar, env, "code", ptr - begin, code);
+        return MAKE_DECODE_ERROR(fvar, env, "field_tag", ptr - begin, code);
 
       field = (code > 0 && code < fvar->field_count())
             ? fvar->field(code) : fvar->field(0);

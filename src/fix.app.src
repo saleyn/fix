@@ -8,8 +8,6 @@
                   stdlib,
                   util
                  ]},
-  {modules, [fix, fix_behavior, fix_logger, fix_native, fix_nif, fix_util,
-             fix_dump, fix_dump_es,
-             'Elixir.FIX.EncodeError', 'Elixir.FIX.DecodeError']},
+  {modules, []},
   {env, [{config, []}]}
  ]}.

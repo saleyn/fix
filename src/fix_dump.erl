@@ -22,20 +22,20 @@
   file,
   xchg,
   variant,
-  app,
-  show_raw=false,
-  skip_comments=true,
-  line=1,
-  errors=0,
+  app :: atom(),
+  show_raw      = false,
+  skip_comments = true,
+  line          = 1,
+  errors        = 0,
   msg_type_tag,
-  from_line=1,
+  from_line     = 1,
   to_line,
   line_count,
-  filters = []
+  filters       = []
 }).
 
 print(Args) when is_map(Args) ->
-  Args    = #args{
+  Args1   = #args{
     xchg          = maps:get(xchg,          Args, undefined),
     variant       = maps:get(variant,       Args, undefined),
     app           = maps:get(app,           Args, undefined),
@@ -44,9 +44,11 @@ print(Args) when is_map(Args) ->
     from_line     = maps:get(from,          Args, 1),
     to_line       = maps:get(to,            Args, undefined),
     line_count    = maps:get(count,         Args, undefined),
-    filters       = maps:get(filters,       Args, [])
+    filters       = maps:get(filters,       Args, []),
+    line          = 1,
+    errors        = 0
   },
-  print(Args#args.app, Args);
+  print(Args1#args.app, Args1);
 
 print(Args) when is_list(Args) ->
   print(undefined, Args).
@@ -113,10 +115,6 @@ usage() ->
     "  Parse FIX log file\n"
     "    ~s -f 20220102-oe1.fix.log\n\n"
     , lists:duplicate(2, filename:basename(escript:script_name()))),
-  throw(usage).
-
-usage(Text) ->
-  io:format(standard_error, "~s\n", [Text]),
   throw(usage).
 
 parse(["-f", File     | T], A) -> parse(T, A#args{file    = File});
@@ -286,7 +284,7 @@ load_fix_variant(State = #args{app=App, filters=FF}) ->
         try          binary:split(Exp, <<"=">>)
         catch _:_ -> erlang:error("Argument -filter must be in format: Field=Value")
         end,
-      G(K,V)
+      G({K,V})
   end, FF),
   State1#args{filters=Filters}.
 
