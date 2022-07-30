@@ -23,6 +23,10 @@
 
 -define(FIX_SO_FILE_MASK, "fix_variant*.so").
 
+-type success_decode() ::
+  {MatchedFldCount::integer(), Header::map(),
+    {MsgType::atom(),Msg::map()}, UnparsedFields::list()}.
+
 %% @doc fix local reimplementation of UTC as a string
 -spec now() -> non_neg_integer().
 now() ->
@@ -42,15 +46,12 @@ timestamp(EpochUSecs) when is_integer(EpochUSecs) ->
 %% `Rest' is the unparsed trailing binary. `MatchedFldCount' is the number
 %% of matched fields in the `Msg'. `Header' is the FIX message header.
 %% `Msg' is a record containing the FIX message body. `UnparsedFields' are
-%% the fields not recognized by the message parser. The 3rd element will be
-%% `false' if the codec couldn't parse the message (e.g. the header doesn't
-%% contain required fields.
--spec decode(nif|native, atom(), atom(), binary(), [binary|full]) ->
-  {ok, Rest::binary(), {MatchedFldCount::integer(), Header::map(),
-                        {MsgType::atom(),Msg::map()}, UnparsedFields::list()} |
-                       false}
+%% the fields not recognized by the message parser.
+-spec decode(nif|native, atom(), atom(), binary(), fix_nif:decode_options()) ->
+  {ok, Rest::binary(), success_decode()}
      | {more, non_neg_integer()}
-     | error.
+     | {error, any()}
+     | no_return().
 decode(Mode, CodecMod, FixVariant, Bin, Options / []) when is_binary(Bin) ->
   try
     case do_split(Mode, CodecMod, FixVariant, Bin, Options) of

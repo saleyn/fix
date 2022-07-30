@@ -9,6 +9,9 @@ test:
 escript:
 	rebar3 escriptize
 
+check:
+	rebar3 dialyzer
+
 generate:
 	./code-gen.es -f spec/FIX44.xml
 

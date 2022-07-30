@@ -112,11 +112,11 @@ field_to_tag(_Variant, _Field) ->
 field_to_bintag(_Variant, _Field) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
--spec encode_fields(atom(), [{atom()|binary()|string()|integer(), atom()|binary()}]) -> binary().
+-spec encode_fields(atom(), [{atom()|binary()|string()|integer(), any()}]) -> binary().
 encode_fields(_Variant, _TagVals) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
--spec encode_field(atom(), atom()|binary()|string()|integer(), atom()) -> binary().
+-spec encode_field(atom(), atom()|binary()|string()|integer(), any()) -> binary().
 encode_field(_Variant, _Field, _Value) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
@@ -134,7 +134,7 @@ decode_field_value(Variant, Field, Value) ->
         nil|                                       %% Default value decoding
         number|decimal|string|binary|              %% Alternative float decoding
         epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Alternative time decoding
-      ) -> atom()|binary().
+      ) -> any().
 decode_field_value(_Variant, _Field, _Value, _Format) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
