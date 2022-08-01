@@ -597,7 +597,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "             ", sq(atom_name('SenderCompID', State)), ", "
                    , sq(atom_name('TargetCompID', State)), ",\n"
     "             ", sq(atom_name('SendingTime',  State)), "], Hdr),\n"
-    "  TStamp  = case maps:find(", sq(atom_name('SendingTime', State)), ", Hdr0) of\n"
+    "  TStamp  = case maps:find(", sq(atom_name('SendingTime', State)), ", Hdr) of\n"
     "              {ok, TS} -> TS;\n"
     "              error    -> fix_util:timestamp()\n"
     "            end,\n"
