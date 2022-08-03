@@ -9,6 +9,7 @@ defmodule FIX.MixProject do
       start_permanent: Mix.env() == :prod,
       deps:            deps(),
       elixirc_paths:   ["src"],
+      compilers:       [:nif] ++ Mix.compilers,
     ]
   end
 
@@ -24,5 +25,12 @@ defmodule FIX.MixProject do
       {:etran,       "~> 0.3",   runtime: false},
       {:util,        "~> 1.0"},
     ]
+  end
+end
+
+defmodule Mix.Tasks.Compile.Nif do
+  def run(_args) do
+    {result, _errcode} = System.cmd("make", ["nif"])
+    IO.binwrite(result)
   end
 end

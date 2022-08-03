@@ -1,0 +1,5 @@
+%{
+  "etran": {:hex, :etran, "0.5.0", "7a29e7fe369c9da7d8d29334afd7c9c94045571b8ae4b5e895a58f110c81621a", [:rebar3], [], "hexpm", "0752f21d8079abfd89b9c786df4e32de6d52669643095530e5a393aa87d009f3"},
+  "parse_trans": {:hex, :parse_trans, "3.3.1", "16328ab840cc09919bd10dab29e431da3af9e9e7e7e6f0089dd5a2d2820011d8", [:rebar3], [], "hexpm", "07cd9577885f56362d414e8c4c4e6bdf10d43a8767abb92d24cbe8b24c54888b"},
+  "util": {:hex, :util, "1.0.4", "88a8b3985740315e796b95ec5c0af61a330d6c21c70f9a2301949d07187213f0", [:rebar3], [], "hexpm", "08312c24dedff5003da86b552395d75512863295ea3da8b55fdd8fcc0ee45b15"},
+}
