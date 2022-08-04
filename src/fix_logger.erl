@@ -522,6 +522,9 @@ check_rotate(#state{fd=Dev, utc=UTC, rotate=Rot} = S, Now) when Dev /= undefined
         {S, Time, undefined, false}
     end,
   if Rotate ->
+    application:get_env(fix, fix_logger_debug, false) == true andalso
+      ?LOG_INFO("~srotating log file (date=~p, sdate=~p)",
+        [S#state.logpfx, Date, S#state.date]),
     file:close(Dev),
     rotate_files(RotType, S1),
     maybe_open_file(S1#state{fd=undefined, fname=undefined}, Now);
