@@ -138,14 +138,9 @@ start(Name, App, Variant, Xchg, Filename, Options) ->
 startit(Name, F, App, Variant, Xchg, Filename, Opts)
   when is_atom(Name), is_atom(F), is_atom(App), is_atom(Variant),
       (is_list(Xchg) orelse is_binary(Xchg)), is_map(Opts) ->
-  Map   = case maps:find(prefix, Opts) of
-            {ok, none} -> Opts#{prefix => ""};
-            {ok, _}    -> Opts;
-            error      -> Opts#{prefix => atom_to_list(Name)}
-          end,
-  Opts1 = maps:merge(Map,
+  Opts1 = maps:merge(Opts,
                     #{filename => Filename, app  => App,
-                      variant  => Variant,  xchg => Xchg}),
+                      variant  => Variant,  xchg => Xchg, name => Name}),
   gen_server:F({local, Name}, ?MODULE, Opts1, []).
 
 %%------------------------------------------------------------------------------
@@ -252,17 +247,19 @@ init(Opts) ->
     UTC     = maps:get(utc,        Opts, false),
     Rotate  = maps:get(rotate,     Opts, date),
     Keep    = maps:get(keep_files, Opts, 5),
-    Pfx     = case maps:find(prefix,Opts) of
-                error      -> "";
-                {ok, none} -> "";
-                {ok,   ""} -> "";
-                {ok,  Str} -> to_list(Str)
+    Name    = atom_to_list(maps:get(name,Opts)),
+    {Pfx,B} = case maps:find(prefix,Opts) of
+                error      -> {" " ++ Name, true};
+                {ok, none} -> {"",  false};
+                {ok,   ""} -> {"",  false};
+                {ok,  Str} -> {to_list(Str), false}
               end,
     LogPfx  = case maps:find(logpfx,Opts) of
-                error      -> Pfx;
-                {ok, none} -> "";
-                {ok,   ""} -> "";
-                {ok, Str2} -> to_list(Str2) ++ ": "
+                error when B -> Name ++ ": ";
+                error        -> Pfx  ++ ": ";
+                {ok, none}   -> "";
+                {ok,   ""}   -> "";
+                {ok, Str2}   -> to_list(Str2) ++ ": "
               end,
     (is_binary(Xchg) orelse is_list(Xchg))
       orelse throw("xchg parameter missing"),
@@ -427,7 +424,7 @@ log2(Logger, Details) when is_pid(Logger) ->
 
 log3(Pid, Details) ->
   {message_queue_len, Len} = erlang:process_info(Pid, message_queue_len),
-  Thr = application:get_env(application:get_application(), async_log_threshold),
+  Thr = application:get_env(fix, async_log_threshold),
   if Len < Thr ->
     gen_server:cast(Pid, Details);
   true ->
@@ -511,25 +508,25 @@ maybe_open_file(State, Now) ->
 
 check_rotate(#state{fd=Dev, utc=UTC, rotate=Rot} = S, Now) when Dev /= undefined ->
   {{Date,_}, _} = Time = split_time(Now, UTC),
-  {S1, Time1, RotType, Rotate} =
+  {S1, Rotate, RotType, Info} =
     case Rot of
       date when Date /= S#state.date ->
-        {S, Time, date, true};
+        {S, true, date, Date};
       {size, Size} when Now - S#state.sz_chk > 15000 ->
         N = filelib:file_size(S#state.fname),
-        {S#state{sz_chk=Now}, Time, size, N > Size};
+        {S#state{sz_chk=Now}, N > Size, size, N};
       _ ->
-        {S, Time, undefined, false}
+        {S, false, undefined, undefined}
     end,
   if Rotate ->
     application:get_env(fix, fix_logger_debug, false) == true andalso
-      ?LOG_INFO("~srotating log file (date=~p, sdate=~p)",
-        [S#state.logpfx, Date, S#state.date]),
+      ?LOG_INFO("~srotating log file (sdate=~p, type=~p, info=~p)",
+        [S#state.logpfx, S#state.date, Rot, Info]),
     file:close(Dev),
     rotate_files(RotType, S1),
     maybe_open_file(S1#state{fd=undefined, fname=undefined}, Now);
   true ->
-    {false, Time1, S1}
+    {false, Time, S1}
   end.
 
 safe_write_file(_DT, header, H, State) when H==""; H == <<"">>; H==undefined ->
