@@ -25,7 +25,8 @@ main(Args) ->
 
 load_paths() ->
   Home   = os:getenv("HOME"),
-  Config = filename:join(Home, ".config/fixdumprc"),
+  Config = os:getenv("FIXDUMP_RC",
+                     filename:join(Home, ".config/fixdumprc")),
   case filelib:is_regular(Config) of
     true ->
       case file:consult(Config) of
@@ -41,13 +42,22 @@ load_paths() ->
 
 try_add_path(Path, Config, Home) ->
   Path1 = replace_home(Path, Home),
-  case filelib:is_dir(Path1) of
-    true ->
-      code:add_patha(Path1);
-    false ->
-      io:format(standard_error, "File ~s contains bad path: ~p\n", [Config, Path]),
+  case check_path(Path1) of
+    {true, P} ->
+      code:add_patha(P);
+    {false,_} ->
+      io:format(standard_error, "File ~s contains bad path: ~p\n", [Config, Path1]),
       halt(1)
   end.
+
+check_path(Path) ->
+  check_path1(filelib:is_dir(Path), Path).
+check_path1(false, Path) -> {false, Path};
+check_path1(true,  Path) -> check_path2(lists:reverse(Path), Path).
+check_path2("nibe/"++_, Path) -> {true, Path};
+check_path2(_, Path) ->
+  P = filename:join(Path, "ebin"),
+  {filelib:is_dir(P), P}.
 
 replace_home(Path, Home) ->
   case re:run(Path,
