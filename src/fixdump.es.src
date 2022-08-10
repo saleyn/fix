@@ -1,6 +1,6 @@
-#!/usr/bin/env escript
+#!/usr/bin/env {{ESCRIPT}}
 %%% vim:sw=2:ts=2:et
-%%! -env ERL_CRASH_DUMP /dev/null
+%%! -env ERL_CRASH_DUMP /dev/null {{FIXDUMP_ENV}}
 %%%-----------------------------------------------------------------------------
 %%% @doc FIX log file parser
 %%%

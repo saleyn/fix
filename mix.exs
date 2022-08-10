@@ -9,7 +9,7 @@ defmodule FIX.MixProject do
       start_permanent: Mix.env() == :prod,
       deps:            deps(),
       elixirc_paths:   ["src"],
-      compilers:       [:nif] ++ Mix.compilers,
+      compilers:       [:nif,:es] ++ Mix.compilers,
     ]
   end
 
@@ -32,5 +32,18 @@ defmodule Mix.Tasks.Compile.Nif do
   def run(_args) do
     {result, _errcode} = System.cmd("make", ["nif"])
     IO.binwrite(result)
+  end
+end
+
+defmodule Mix.Tasks.Compile.Es do
+  def run(_args) do
+    val  = System.get_env("FIXDUMP_ENV",      "")
+    escr = System.get_env("ESCRIPT",   "escript")
+    body = File.read!("src/fixdump.es.src")
+        |> String.replace("{{ESCRIPT}}",    escr)
+        |> String.replace("{{FIXDUMP_ENV}}", val)
+    :ok  = File.write!("priv/fixdump.es",   body)
+    :ok  = File.chmod!("priv/fixdump.es",  0o755)
+    IO.puts("Copied src/fixdump.es.src -> priv/fixdump.es")
   end
 end

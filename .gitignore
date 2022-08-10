@@ -1,5 +1,6 @@
 ebin
 priv/*.so
+priv/*.es
 .eunit
 _build
 deps
