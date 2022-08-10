@@ -36,14 +36,24 @@ defmodule Mix.Tasks.Compile.Nif do
 end
 
 defmodule Mix.Tasks.Compile.Es do
+  use Mix.Task.Compiler
+
+  @fixdump "priv/fixdump.es"
+
+  @impl true
   def run(_args) do
     val  = System.get_env("FIXDUMP_ENV",      "")
     escr = System.get_env("ESCRIPT",   "escript")
     body = File.read!("src/fixdump.es.src")
         |> String.replace("{{ESCRIPT}}",    escr)
         |> String.replace("{{FIXDUMP_ENV}}", val)
-    :ok  = File.write!("priv/fixdump.es",   body)
-    :ok  = File.chmod!("priv/fixdump.es",  0o755)
-    IO.puts("Copied src/fixdump.es.src -> priv/fixdump.es")
+    :ok  = File.write!(@fixdump,  body)
+    :ok  = File.chmod!(@fixdump, 0o755)
+    IO.puts("Copied src/fixdump.es.src -> " <> @fixdump)
+  end
+
+  @impl true
+  def clean() do
+    :ok == File.rm(@fixdump) && IO.puts("Deleted " <> @fixdump)
   end
 end
