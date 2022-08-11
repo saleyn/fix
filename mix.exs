@@ -55,8 +55,9 @@ defmodule Mix.Tasks.Compile.Priv do
     IO.puts("Copied src/fixdump.es.src -> " <> @fixdump)
 
     if outdir != File.cwd! do
-      :ok = File.cp!(@fixdump, outdir <> @fixdump)
-      IO.puts("Copied #{@fixdump}, #{outdir <> @fixdump}")
+      dest = Path.join(outdir, @fixdump)
+      :ok = File.cp!(@fixdump, dest)
+      IO.puts("Copied #{@fixdump}, #{dest}")
     end
 
     :ok
