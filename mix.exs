@@ -9,7 +9,7 @@ defmodule FIX.MixProject do
       start_permanent: Mix.env() == :prod,
       deps:            deps(),
       elixirc_paths:   ["src"],
-      compilers:       [:nif,:es] ++ Mix.compilers,
+      compilers:       [:priv] ++ Mix.compilers,
     ]
   end
 
@@ -30,18 +30,21 @@ end
 
 defmodule Mix.Tasks.Compile.Nif do
   def run(_args) do
-    {result, _errcode} = System.cmd("make", ["nif"])
-    IO.binwrite(result)
   end
 end
 
-defmodule Mix.Tasks.Compile.Es do
+defmodule Mix.Tasks.Compile.Priv do
   use Mix.Task.Compiler
 
   @fixdump "priv/fixdump.es"
 
   @impl true
   def run(_args) do
+    outdir = Keyword.get(Mix.Project.config(), :app_path, File.cwd!)
+
+    {result, _errcode} = System.cmd("make", ["nif"], [env: [{"REBAR_BARE_COMPILER_OUTPUT_DIR", outdir}]])
+    IO.binwrite(result)
+
     val  = System.get_env("FIXDUMP_ENV",      "")
     escr = System.get_env("ESCRIPT",   "escript")
     body = File.read!("src/fixdump.es.src")
@@ -50,10 +53,22 @@ defmodule Mix.Tasks.Compile.Es do
     :ok  = File.write!(@fixdump,  body)
     :ok  = File.chmod!(@fixdump, 0o755)
     IO.puts("Copied src/fixdump.es.src -> " <> @fixdump)
+
+    if outdir != File.cwd! do
+      :ok = File.cp!(@fixdump, outdir <> @fixdump)
+      IO.puts("Copied #{@fixdump}, #{outdir <> @fixdump}")
+    end
+
+    :ok
   end
 
   @impl true
   def clean() do
     :ok == File.rm(@fixdump) && IO.puts("Deleted " <> @fixdump)
+    files = File.rm_rf!("priv")
+    files != [] && IO.puts("Deleted #{inspect(files)}")
+
+    outdir = Keyword.get(Mix.Project.config(), :app_path)
+    outdir && Path.join(outdir, "priv") |> File.rm_rf! |> then(& (&1 != [] && IO.puts("Deleted #{inspect(&1)}")))
   end
 end

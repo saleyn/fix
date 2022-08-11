@@ -1,7 +1,7 @@
 # Based on c_src.mk from erlang.mk by Loic Hoguin <essen@ninenines.eu>
 
 CURDIR    := $(shell pwd)
-REBAR_BARE_COMPILER_OUTPUT_DIR ?= $(abspath $(CURDIR)/..)
+BASEDIR   := $(abspath $(CURDIR)/..)
 OUTDIR    := $(REBAR_BARE_COMPILER_OUTPUT_DIR)
 REBAR_ENV ?= $(shell echo "${REBAR_BUILD_DIR}" | sed 's,^.*_build/,,')
 
@@ -11,10 +11,14 @@ ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -eval "io:format(\"~ts\", [code:li
 
 SOURCES := $(wildcard fix_nif.cpp) $(wildcard fix_variant*.cpp)
 OBJECTS := $(addsuffix .o,  $(basename $(SOURCES)))
-TARGETS := $(addprefix $(OUTDIR)/priv/, $(addsuffix .so, $(basename $(SOURCES))))
+TARGETS := $(addprefix $(BASEDIR)/priv/, $(addsuffix .so, $(basename $(SOURCES))))
 HEADERS := util.hpp
 
 INC_DIR :=
+
+ifneq ($(OUTDIR),)
+	TARGETS += $(addprefix $(OUTDIR)/priv/, $(addsuffix .so, $(basename $(SOURCES))))
+endif
 
 all: $(TARGETS)
 
@@ -63,10 +67,13 @@ link_verbose = $(link_verbose_$(V))
 
 COMPILE_CPP = $(cpp_verbose) $(CXX) $(CXXFLAGS) $(CPPFLAGS) -c
 
-$(OUTDIR)/priv/%.so: %.o | $(OUTDIR)/priv
+$(BASEDIR)/priv/%.so: %.o | $(BASEDIR)/priv
 	$(link_verbose) $(CXX) $< $(LDFLAGS) $(LDLIBS) -o $@
 
-$(OUTDIR)/priv:
+$(OUTDIR)/priv/%.so: $(BASEDIR)/priv/%.so $(OUTDIR)/priv
+	@cp -vf $< $@
+
+$(BASEDIR)/priv $(OUTDIR)/priv:
 	@mkdir -p $@
 
 %.o: %.cpp $(HEADERS)
