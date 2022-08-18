@@ -1,7 +1,7 @@
 # Based on c_src.mk from erlang.mk by Loic Hoguin <essen@ninenines.eu>
 
 CURDIR    := $(shell pwd)
-BASEDIR   := $(abspath $(CURDIR)/..)
+BASEDIR   := $(if $(patsubst %c_src,,$(lastword $(CURDIR))),$(abspath $(CURDIR)/..),..)
 OUTDIR    := $(REBAR_BARE_COMPILER_OUTPUT_DIR)
 REBAR_ENV ?= $(shell echo "${REBAR_BUILD_DIR}" | sed 's,^.*_build/,,')
 
@@ -16,8 +16,10 @@ HEADERS := util.hpp
 
 INC_DIR :=
 
+ifneq ($(OUTDIR),$(BASEDIR))
 ifneq ($(OUTDIR),)
 	TARGETS += $(addprefix $(OUTDIR)/priv/, $(addsuffix .so, $(basename $(SOURCES))))
+endif
 endif
 
 all: $(TARGETS)
@@ -70,11 +72,22 @@ COMPILE_CPP = $(cpp_verbose) $(CXX) $(CXXFLAGS) $(CPPFLAGS) -c
 $(BASEDIR)/priv/%.so: %.o | $(BASEDIR)/priv
 	$(link_verbose) $(CXX) $< $(LDFLAGS) $(LDLIBS) -o $@
 
-$(OUTDIR)/priv/%.so: $(BASEDIR)/priv/%.so $(OUTDIR)/priv
-	@cp -vf $< $@
-
-$(BASEDIR)/priv $(OUTDIR)/priv:
+$(BASEDIR)/priv:
 	@mkdir -p $@
+
+ifneq ($(BASEDIR),$(OUTDIR))
+ifneq (,$(OUTDIR))
+$(OUTDIR)/priv/%.so: $(BASEDIR)/priv/%.so | $(OUTDIR)/priv
+	@if [ "$(shell readlink -f $<)" == "$(shell readlink -f $@)" ]; then \
+		echo "Skip copying file to $@: source and destination are the same"; \
+	else \
+	  cp -vf "$<" "$@"; \
+	fi
+
+$(OUTDIR)/priv:
+	@mkdir -p $@
+endif
+endif
 
 %.o: %.cpp $(HEADERS)
 	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
