@@ -57,7 +57,7 @@ defmodule Mix.Tasks.Compile.Priv do
     dest = Path.join(outdir, @fixdump)
     if System.cmd("readlink", ["-f", @fixdump]) != System.cmd("readlink", ["-f", dest]) do
       :ok = File.cp!(@fixdump, dest)
-      IO.puts("Copied #{@fixdump}, #{dest}")
+      IO.puts("Copied #{@fixdump} -> #{dest}")
     end
 
     :ok
