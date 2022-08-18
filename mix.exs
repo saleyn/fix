@@ -54,8 +54,8 @@ defmodule Mix.Tasks.Compile.Priv do
     :ok  = File.chmod!(@fixdump, 0o755)
     IO.puts("Copied src/fixdump.es.src -> " <> @fixdump)
 
-    if outdir != File.cwd! do
-      dest = Path.join(outdir, @fixdump)
+    dest = Path.join(outdir, @fixdump)
+    if System.cmd("readlink", ["-f", @fixdump]) != System.cmd("readlink", ["-f", dest]) do
       :ok = File.cp!(@fixdump, dest)
       IO.puts("Copied #{@fixdump}, #{dest}")
     end
