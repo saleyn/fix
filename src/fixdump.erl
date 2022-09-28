@@ -213,8 +213,8 @@ print_line2(Line, State) when is_binary(Line) ->
     catch _:_ ->
       case binary:match(Line, <<"8=FIX.">>) of
         {N,_} ->
-          <<_:N/binary, BMsg2/binary>> = Line,
-          {[], BMsg2};
+          <<Hdr:N/binary, Body/binary>> = Line,
+          {[Hdr], Body};
         _ ->
           print_line3({error, invalid_format}, Line, State)
       end
@@ -254,7 +254,7 @@ print_line4(Pfx, BMsg, Fields, #args{line=LineNo, xchg=Xchg, msg_type_tag=MTT, s
   ML   = lists:foldl(fun(T,S) -> max(length(val(element(1,T))),S) end, 25, Fields),
   RWid = 22,
   Sep  = hpad("", 11+ML+5+11+16 + (if Raw -> RWid+3+3; true -> 0 end)),
-  Pfx /= [] andalso io:format("~ts\n~.8.0w: ~s~s: ~s\n", [Sep, LineNo, Pfx, Xchg, val(MsgType)]),
+  io:format("~ts\n~.8.0w: ~s~s: ~s\n", [Sep, LineNo, Pfx, Xchg, val(MsgType)]),
   {Fmt, Args} =
     if Raw ->
       io:format("──No─┬───Tag─┬─~ts─┬─~ts─┬─~ts\n",
