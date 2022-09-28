@@ -10,8 +10,8 @@
 %%%-----------------------------------------------------------------------------
 %%% Created: 2012-07-09
 %%%-----------------------------------------------------------------------------
--module(fix_dump).
--export([print/1, print/2, print/5]).
+-module(fixdump).
+-export([main/1, print/1, print/2, print/5]).
 
 -mode(compile).
 
@@ -25,6 +25,7 @@
   app :: atom(),
   show_raw      = false,
   skip_comments = true,
+  mode          = nif   :: nif | native,
   line          = 1,
   errors        = 0,
   msg_type_tag,
@@ -34,12 +35,24 @@
   filters       = []
 }).
 
+main(Args) ->
+  load_paths(),
+  try
+    fix_dump:print(Args)
+  catch throw:What ->
+    case What of
+      {stop,I} -> halt(I);
+      usage    -> halt(1)
+    end
+  end.
+
 print(Args) when is_map(Args) ->
   Args1   = #args{
     xchg          = maps:get(xchg,          Args, undefined),
     variant       = maps:get(variant,       Args, undefined),
     app           = maps:get(app,           Args, undefined),
     show_raw      = maps:get(show_raw,      Args, false),
+    mode          = maps:get(mode,          Args, nif),
     skip_comments = maps:get(skip_comments, Args, true),
     from_line     = maps:get(from,          Args, 1),
     to_line       = maps:get(to,            Args, undefined),
@@ -90,6 +103,7 @@ usage() ->
     "  -x Xchg                  - Exchange name\n"
     "  -v Variant               - FIX Variant\n"
     "  -a App                   - FIX Variant application\n"
+    "  -m Mode                  - Parsing mode 'nif' or 'native' (default: 'nif')\n"
 		"  -r|--raw                 - Show raw FIX field values\n"
     "  -c|--comments            - Print comment lines that begin with '#'\n"
     "  -L|--list                - List content of the archive to stdout\n"
@@ -117,14 +131,16 @@ usage() ->
     , lists:duplicate(2, filename:basename(escript:script_name()))),
   throw(usage).
 
-parse(["-f", File     | T], A) -> parse(T, A#args{file    = File});
-parse(["-x", Xchg     | T], A) -> parse(T, A#args{xchg    = to_bin(Xchg)});
-parse(["-v", Var      | T], A) -> parse(T, A#args{variant = to_atom(Var)});
-parse(["-a", App      | T], A) -> parse(T, A#args{app     = to_atom(App)});
+parse(["-f", File     | T], A) -> parse(T, A#args{file          = File});
+parse(["-x", Xchg     | T], A) -> parse(T, A#args{xchg          = to_bin(Xchg)});
+parse(["-v", Var      | T], A) -> parse(T, A#args{variant       = to_atom(Var)});
+parse(["-a", App      | T], A) -> parse(T, A#args{app           = to_atom(App)});
 parse(["-c"           | T], A) -> parse(T, A#args{skip_comments = false});
 parse(["--comments"   | T], A) -> parse(T, A#args{skip_comments = false});
 parse(["-L"           | _], _) -> list_archive(), throw({stop, 1});
 parse(["-r"           | T], A) -> parse(T, A#args{show_raw      = true});
+parse(["-m", "nif"    | T], A) -> parse(T, A#args{mode          = nif});
+parse(["-m", "native" | T], A) -> parse(T, A#args{mode          = native});
 parse(["--raw"        | T], A) -> parse(T, A#args{show_raw      = true});
 parse([Cmd,Fr,To|T], A) when Cmd=="-l"; Cmd=="--lines" ->
   I1=to_int(Cmd,Fr), I2=to_int(Cmd,To),
@@ -199,24 +215,46 @@ print_line2(<<"8=FIX", _/binary>>=Line, State) ->
   print_line3([], Line, State);
 
 print_line2(Line, State) when is_binary(Line) ->
-  [Time, L1] = binary:split(Line, <<" ">>),
-  [OE,   L2] = binary:split(L1,   <<" ">>),
-  [Dir,BMsg] = binary:split(L2,   <<" ">>),
-  print_line3([Time, " ", OE, " ", Dir, " "], BMsg, State).
+  {Pfx, Msg} =
+    try
+      [Time, L1] = binary:split(Line, <<" ">>),
+      [OE,   L2] = binary:split(L1,   <<" ">>),
+      [Dir,BMsg] = binary:split(L2,   <<" ">>),
+      {[Time, " ", OE, " ", Dir, " "], BMsg}
+    catch _:_ ->
+      case binary:match(Line, <<"8=FIX.">>) of
+        {N,_} ->
+          <<_:N/binary, BMsg2/binary>> = Line,
+          {[], BMsg2};
+        _ ->
+          print_line3({error, invalid_format}, Line, State)
+      end
+    end,
+  print_line3(Pfx, Msg, State).
 
-print_line3(Pfx, Line, State) ->
+print_line3(Pfx, Line, #args{mode = Mode} = State) ->
   case check_filter(Line, State#args.filters) of
-    true  ->
+    true when is_list(Pfx) ->
       try
-        {ok, _, Fields} = fix_nif:split(State#args.variant, Line, [{float, binary}, {time, binary}]),
+        {ok, _, Fields} =
+          case Mode of
+            nif ->
+              fix_nif:split(State#args.variant, Line, [{float, binary}, {time, binary}]);
+            _   ->
+              M = State#args.app,
+              M:split(native, Line, [{float, binary}, {time, binary}])
+          end,
         print_line4(Pfx, Line, Fields, State)
       catch _:Err ->
-        io:format("~.8.0w: Error decoding message: ~p\n  ~s\n", [State#args.line, Err, Line]),
-        State#args{line = State#args.line+1, errors = State#args.errors+1}
+        print_line4({error, Err}, Line, [], State)
       end;
-    false ->
+    _ ->
       State#args{line = State#args.line+1}
   end.
+
+print_line4({error, Error}, Line, _Fields, State) ->
+  io:format("~.8.0w: Error decoding message: ~p\n  ~s\n", [State#args.line, Error, Line]),
+  State#args{line = State#args.line+1, errors = State#args.errors+1};
 
 print_line4(Pfx, BMsg, Fields, #args{line=LineNo, xchg=Xchg, msg_type_tag=MTT, show_raw=Raw} = State) ->
   MsgType =
@@ -227,7 +265,7 @@ print_line4(Pfx, BMsg, Fields, #args{line=LineNo, xchg=Xchg, msg_type_tag=MTT, s
   ML   = lists:foldl(fun(T,S) -> max(length(val(element(1,T))),S) end, 25, Fields),
   RWid = 22,
   Sep  = hpad("", 11+ML+5+11+16 + (if Raw -> RWid+3+3; true -> 0 end)),
-  io:format("~ts\n~.8.0w: ~s~s: ~s\n", [Sep, LineNo, Pfx, Xchg, val(MsgType)]),
+  Pfx /= [] andalso io:format("~ts\n~.8.0w: ~s~s: ~s\n", [Sep, LineNo, Pfx, Xchg, val(MsgType)]),
   {Fmt, Args} =
     if Raw ->
       io:format("──No─┬───Tag─┬─~ts─┬─~ts─┬─~ts\n",
@@ -259,12 +297,12 @@ check_filter(Line, Filters) ->
     Filters
   ) /= [].
 
-load_fix_variant(State = #args{app=App, filters=FF}) ->
+load_fix_variant(State = #args{app=App, filters=FF, mode=Mode}) ->
   % Load the FIX variant for this file
-  fix_nif:load_variant(App),
+  Mode == nif andalso fix_nif:load_variant(App),
 
   % Get MsgType field atom ('MsgType' or 'Elixir.MsgType')
-  State1 = State#args{msg_type_tag = fix_nif:tag_to_field(App, 35)},
+  State1  = State#args{msg_type_tag = fix_nif:tag_to_field(App, 35)},
 
   % Update filters
   Filters = lists:map(fun
@@ -335,3 +373,71 @@ read_file(IO, State) ->
 		eof ->
 			ok
 	end.
+
+load_paths() ->
+  Home   = os:getenv("HOME"),
+  Config = os:getenv("FIXDUMP_RC",
+                     filename:join(Home, ".config/fixdumprc")),
+  % The format of the resource file can be either '\n' delimitted paths
+  % or a file readable by file:consult/1, containing a list of paths
+  case filelib:is_regular(Config) of
+    true ->
+      try
+        Paths =
+          case file:consult(Config) of
+            {ok, [Paths0]} ->
+              Paths0;
+            {error, What} ->
+              case file:read_file(Config) of
+                {ok, Bin} ->
+                  Paths1 = [P || P <- binary:split(Bin, <<"\n">>, [global]),
+                                      re:run(P, "^\\s*[#%]") == nomatch, P /= <<"">>],
+                  length(Paths1) > 0
+                    andalso re:run(hd(Paths1), "^\\s*\\[") /= nomatch
+                    andalso erlang:error(What),
+                  Paths1;
+                {error, Err} ->
+                  erlang:error(Err)
+              end
+          end,
+        [try_add_path(binary_to_list(P), Config, Home) || P <- Paths],
+        ok
+      catch _:Error:ST ->
+        io:format("Error reading config file ~s: ~p\n  ~p\n", [Config, Error, ST]),
+        halt(1)
+      end;
+    false ->
+      ok
+  end.
+
+try_add_path(Path, Config, Home) ->
+  Path1 = replace_home(Path, Home),
+  case check_path(Path1) of
+    {true, P} ->
+      code:add_patha(P);
+    {false,_} ->
+      io:format(standard_error, "File ~s contains bad path: ~p\n", [Config, Path1]),
+      halt(1)
+  end.
+
+check_path(Path) ->
+  check_path1(filelib:is_dir(Path), Path).
+check_path1(false, Path) -> {false, Path};
+check_path1(true,  Path) -> check_path2(lists:reverse(Path), Path).
+check_path2("nibe/"++_, Path) -> {true, Path};
+check_path2(_, Path) ->
+  P = filename:join(Path, "ebin"),
+  {filelib:is_dir(P), P}.
+
+replace_home(Path, Home) ->
+  case re:run(Path,
+      "(?|(?:\\$\\$)|(?:~[^/$]*)|(?:\\${[A-Za-z][A-Za-z_0-9]*})|(?:\\$[A-Za-z][A-Za-z_0-9]*))",
+      [global, {capture, all}])
+  of
+    {match, List} ->
+      lists:foldl(fun([{Pos,Len}], P) ->
+        string:substr(P, 1, Pos) ++ Home ++ string:substr(P, Pos+1+Len)
+      end, Path, List);
+    nomatch ->
+      Path
+  end.
