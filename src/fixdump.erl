@@ -11,7 +11,7 @@
 %%% Created: 2012-07-09
 %%%-----------------------------------------------------------------------------
 -module(fixdump).
--export([main/1, print/1, print/2, print/5]).
+-export([print/1, print/2, print/5]).
 
 -mode(compile).
 
