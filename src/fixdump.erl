@@ -234,8 +234,11 @@ print_line3(Pfx, Line, #args{mode = Mode} = State) ->
               M:split(native, Line, [{float, binary}, {time, binary}])
           end,
         print_line4(Pfx, Line, Fields, State)
-      catch _:Err ->
-        print_line4({error, Err}, Line, [], State)
+      catch
+        _:terminated ->
+          erlang:error(normal);
+        _:Err ->
+          print_line4({error, Err}, Line, [], State)
       end;
     _ ->
       State#args{line = State#args.line+1}

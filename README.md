@@ -2,10 +2,10 @@
 
 This is a non-backward compatible fork of the
 [original work](https://github.com/maxlapshin/fix) by Maxim Lapshin,
-in which we implement performance improvements to the
-NIF FIX parser.  The intent was to improve and convert this project to a FIX
-marshaling library suitable for use in other projects rather than having a
-functional FIX client/server implementation.
+which is nearly a complete rewrite that implements performance improvements to the
+NIF FIX parser.  The intent of this fork and rewrite was to improve and convert this
+project to a standalone FIX marshaling library suitable for use in other projects
+rather than having a functional FIX client/server implementation.
 
 ## FIX protocol
 

@@ -488,16 +488,16 @@ list_field_values_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   FixVariant* var;
   int         code;
 
-  if (argc != 2 || !enif_is_atom(env, argv[0])
-                || !arg_code(var, env, argv[1], code, -1)) [[unlikely]]
+  if (argc != 2 || !enif_is_atom(env, argv[0])) [[unlikely]]
     return enif_make_badarg(env);
 
   if (!pers->get(argv[0], var)) [[unlikely]]
     return enif_raise_exception(env, am_undefined_fix_variant);
 
-  auto f = var->field(code);
+  auto f = var->field(env, argv[1]);
 
-  assert(f);  // This is guaranteed by the check above
+  if (!f) [[unlikely]]
+    return enif_make_badarg(env);
 
   std::vector<ERL_NIF_TERM> res;
   res.reserve(f->values().size());
