@@ -16,7 +16,7 @@
 main(Args) ->
   load_paths(),
   try
-    fix_dump:print(Args)
+    fixdump:print(Args)
   catch throw:What ->
     case What of
       {stop,I} -> halt(I);
