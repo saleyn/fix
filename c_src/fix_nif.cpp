@@ -293,7 +293,7 @@ field_to_tag(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[], bool is_bin)
   if (!field)
     return enif_raise_exception(env, am_undefined_field);
 
-  return is_bin ? var->copy_bin_tag(env, field->id())
+  return is_bin ? create_binary(env, field->id())
                 : enif_make_int(env, field->id());
 }
 
@@ -486,7 +486,6 @@ list_field_values_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return enif_raise_exception(env, am_badenv);
 
   FixVariant* var;
-  int         code;
 
   if (argc != 2 || !enif_is_atom(env, argv[0])) [[unlikely]]
     return enif_make_badarg(env);

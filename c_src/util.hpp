@@ -309,6 +309,8 @@ struct Field {
     DecF                        dec_fun
   );
 
+  ~Field();
+
   int                     debug()           const;
 
   int                     id()              const { return m_id;           }
@@ -437,8 +439,6 @@ private:
 // Manages FIX variant fields metadata and shared binaries: <<"1">>,<<"2">>, ...
 //------------------------------------------------------------------------------
 struct FixVariant {
-  using BinsArray        = std::vector<ERL_NIF_TERM>;
-  using FieldValsArray   = std::vector<std::vector<FieldChoice>>;
   using FieldAndTagConst = std::pair<Field const*, ERL_NIF_TERM>;
   using FieldAndTag      = std::pair<Field*,       ERL_NIF_TERM>;
 
@@ -466,15 +466,6 @@ struct FixVariant {
   Field*              field(ErlNifEnv*, ERL_NIF_TERM tag);
 
   int                 field_count() const { return m_fields.size(); }
-
-  // Return a shared binary representation of an integer that can be returned
-  // from a NIF
-  ERL_NIF_TERM copy_bin_tag(ErlNifEnv* env, unsigned idx)
-  {
-    if (idx==0 || idx >= m_fields.size()) [[unlikely]]
-      return null();
-    return enif_make_copy(env, m_bins[idx]);
-  }
 
   int find_tag_by_name(std::string_view&& name) const
   {
@@ -509,7 +500,6 @@ private:
   std::string           m_so_path;
   void*                 m_so_handle;
   std::vector<Field>    m_fields;
-  BinsArray             m_bins;       // <<"1">>, <<"2">>, ...
   NameToTagMap          m_name_to_tag_map;
   AtomToTagMap          m_atom_to_tag_map;
 };
@@ -882,6 +872,15 @@ inline ERL_NIF_TERM create_binary(ErlNifEnv* env, const std::string_view& s)
   return enif_make_binary(env, &bin);
 }
 
+inline ERL_NIF_TERM create_binary(ErlNifEnv* env, int num)
+{
+  assert(env);
+
+  char buf[24];
+  int  n = snprintf(buf, sizeof(buf), "%d", num);
+  return create_binary(env, std::string_view(buf, n));
+}
+
 // NOTE: check for am_enomem upon return!
 template <typename Ch>
 inline ERL_NIF_TERM create_binary(ErlNifEnv* env, const Ch* s, int len)
@@ -1046,7 +1045,8 @@ FieldChoice::get_atom(ErlNifEnv* env) const {
 //------------------------------------------------------------------------------
 
 inline Field::Field()
-  : m_id          (0)
+  : m_var         (nullptr)
+  , m_id          (0)
   , m_type        (FieldType::UNDEFINED)
   , m_dtype       (DataType::UNDEFINED)
   , m_atom        (0)
@@ -1137,6 +1137,13 @@ inline Field::Field(Field&& a_rhs)
   m_name_map.swap(a_rhs.m_name_map);
 }
 
+Field::~Field()
+{
+  m_atom_map.clear();
+  m_name_map.clear();
+  m_choices.clear();
+}
+
 inline void Field::operator=(Field&& a_rhs)
 {
   m_var          = a_rhs.m_var;
@@ -1178,7 +1185,7 @@ inline void Field::operator=(Field const& a_rhs)
 }
 
 inline int
-Field::debug()      const { return m_var->debug(); }
+Field::debug()      const { assert(m_var); return m_var->debug(); }
 
 inline Persistent   const*
 Field::pers()       const { assert(m_var); return m_var->pers(); }
@@ -1529,6 +1536,7 @@ inline Persistent::Persistent(std::vector<std::string> const& so_files,
 inline Persistent::~Persistent()
 {
   m_variants.clear();
+  m_var_storage.clear();
   enif_free_env(m_env);
   m_env = nullptr;
 }
@@ -1689,24 +1697,8 @@ inline FixVariant
       m_name.c_str(), m_app_name.c_str(), m_fields.size(), so_file.c_str(),
       replace ? "replace" : "preserve");
 
-  m_bins.resize(0);
-  m_bins.reserve(m_fields.size()+1);
-
   for (int i=0; i < field_count(); ++i)
   {
-    // Initialize m_bins[i] with integer_to_binary(i)
-    char s[16];
-    int  len = snprintf(s, sizeof(s), "%d", i);
-
-    DBGPRINT(m_pers->debug(), 4, "FIX(%s): initializing binary: %s",
-      m_name.c_str(), s);
-
-    auto val = create_binary(env(), s, len);
-    if (val == am_enomem) [[unlikely]]
-      throw enomem_error("Error allocating %d bytes of memory", len);
-
-    m_bins.emplace_back(val);
-
     // Populate the map that converts field names to tags
     if (m_fields[i].id() == 0)
       continue;
@@ -1728,6 +1720,10 @@ inline FixVariant::~FixVariant()
 {
   if (m_pers)
     DBGPRINT(m_pers->debug(), 1, "FIX: removing variant %s", m_name.c_str());
+
+  m_fields.clear();
+  m_name_to_tag_map.clear();
+  m_atom_to_tag_map.clear();
 
   if (m_so_handle)
     dlclose(m_so_handle);
