@@ -241,6 +241,9 @@ print_line3(Pfx, Line, #args{mode = Mode} = State) ->
       State#args{line = State#args.line+1}
   end.
 
+print_line4({error, terminated}, _Line, _Fields, State) ->
+  State;
+
 print_line4({error, Error}, Line, _Fields, State) ->
   io:format("~.8.0w: Error decoding message: ~p\n  ~s\n", [State#args.line, Error, Line]),
   State#args{line = State#args.line+1, errors = State#args.errors+1};
