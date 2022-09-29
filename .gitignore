@@ -1,7 +1,8 @@
-ebin
+bin/
+ebin/
 priv/*.so
 priv/*.es
 .eunit
-_build
-deps
+_build/
+deps/
 rebarconfig.json

@@ -1,4 +1,4 @@
-all: compile escript
+all: compile #escript
 
 compile:
 	mix compile

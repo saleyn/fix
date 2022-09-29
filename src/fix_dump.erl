@@ -10,7 +10,7 @@
 %%%-----------------------------------------------------------------------------
 %%% Created: 2012-07-09
 %%%-----------------------------------------------------------------------------
--module(fixdump).
+-module(fix_dump).
 -export([main/1, print/1, print/2, print/5]).
 
 -mode(compile).
@@ -24,6 +24,7 @@
   variant,
   app :: atom(),
   show_raw      = false,
+  show_decoded  = true,
   skip_comments = true,
   mode          = nif   :: nif | native,
   line          = 1,
@@ -32,13 +33,14 @@
   from_line     = 1,
   to_line,
   line_count,
-  filters       = []
+  filters       = [],
+  excludes      = []
 }).
 
 main(Args) ->
   load_paths(),
   try
-    fixdump:print(["-m", "native"] ++ Args) %%[binary_to_list(I) || I <- Args])
+    print(["-m", "native"] ++ Args) %%[binary_to_list(I) || I <- Args])
   catch throw:What ->
     case What of
       {stop,I} -> halt(I);
@@ -58,6 +60,7 @@ print(Args) when is_map(Args) ->
     to_line       = maps:get(to,            Args, undefined),
     line_count    = maps:get(count,         Args, undefined),
     filters       = maps:get(filters,       Args, []),
+    excludes      = maps:get(excludes,      Args, []),
     line          = 1,
     errors        = 0
   },
@@ -105,13 +108,15 @@ usage() ->
     "  -a App                   - FIX Variant application\n"
     "  -m Mode                  - Parsing mode 'nif' or 'native' (default: 'nif')\n"
 		"  -r|--raw                 - Show raw FIX field values\n"
+		"  -R                       - Show raw FIX field values but don't add the decoded column\n"
     "  -c|--comments            - Print comment lines that begin with '#'\n"
     "  -L|--list                - List content of the archive to stdout\n"
     "  -l|--lines From To       - Print decoded range of lines: From..To\n"
     "  -from|--from-line  From  - Print range of lines begining with From\n"
     "  -to  |--to-line    From  - Print range of lines begining with From\n"
     "  -count|--line-count Cnt  - Print at most Cnt lines\n"
-    "  -filter|--filter Exp     - Filter field. Exp: 'Field=Value'\n"
+    "  -filter|--filter Exp     - Filter field value. Exp: 'Field=Value'\n"
+    "  -exclude|--exclude Exp   - Filter out field value. Exp: 'Field=Value'\n"
     "\n"
     "In order for this script to be able to parse log files of a FIX variant,\n"
     "the path to the FIX variant application must be added to a resource file\n"
@@ -137,18 +142,19 @@ parse(["-a", App      | T], A) -> parse(T, A#args{app           = to_atom(App)})
 parse(["-c"           | T], A) -> parse(T, A#args{skip_comments = false});
 parse(["--comments"   | T], A) -> parse(T, A#args{skip_comments = false});
 parse(["-L"           | _], _) -> list_archive(), throw({stop, 1});
+parse(["--raw"        | T], A) -> parse(T, A#args{show_raw      = true});
 parse(["-r"           | T], A) -> parse(T, A#args{show_raw      = true});
+parse(["-R"           | T], A) -> parse(T, A#args{show_raw      = true, show_decoded=false});
 parse(["-m", "nif"    | T], A) -> parse(T, A#args{mode          = nif});
 parse(["-m", "native" | T], A) -> parse(T, A#args{mode          = native});
-parse(["--raw"        | T], A) -> parse(T, A#args{show_raw      = true});
 parse([Cmd,Fr,To|T], A) when Cmd=="-l"; Cmd=="--lines" ->
   I1=to_int(Cmd,Fr), I2=to_int(Cmd,To),
   parse(T, A#args{from_line = I1, to_line = I2});
 parse([Cmd,N|T], A) when Cmd=="-from";  Cmd=="--from-line"  -> I1=to_int(Cmd,N), parse(T, A#args{from_line  = I1});
 parse([Cmd,N|T], A) when Cmd=="-to";    Cmd=="--to-line"    -> I1=to_int(Cmd,N), parse(T, A#args{to_line    = I1});
 parse([Cmd,N|T], A) when Cmd=="-count"; Cmd=="--line-count" -> I1=to_int(Cmd,N), parse(T, A#args{line_count = I1});
-parse(["-filter", Exp | T], A) -> parse(T, A#args{filters = [to_bin(Exp)|A#args.filters]});
-parse(["--filter",Exp | T], A) -> parse(T, A#args{filters = [to_bin(Exp)|A#args.filters]});
+parse([I, Exp | T], A) when I=="-filter"; I=="--filter"     -> parse(T, A#args{filters  = [to_bin(Exp)|A#args.filters]});
+parse([I, Exp | T], A) when I=="-exclude";I=="--exclude"    -> parse(T, A#args{excludes = [to_bin(Exp)|A#args.excludes]});
 parse(["-h"           | _], _) -> usage();
 parse(["--help"       | _], _) -> usage();
 parse([Other          | _], _) ->
@@ -231,14 +237,14 @@ print_line2(Line, State) when is_binary(Line) ->
     end,
   print_line3(Pfx, Msg, State).
 
-print_line3(Pfx, Line, #args{mode = Mode} = State) ->
-  case check_filter(Line, State#args.filters) of
+print_line3(Pfx, Line, #args{mode=Mode, app=App} = State) ->
+  case check_filter(Line, State#args.filters, State#args.excludes) of
     true when is_list(Pfx) ->
       try
         {ok, _, Fields} =
           case Mode of
             nif ->
-              fix_nif:split(State#args.variant, Line, [{float, binary}, {time, binary}]);
+              App:split(Mode, Line, [{float, binary}, {time, binary}]);
             _   ->
               M = State#args.app,
               M:split(native, Line, [{float, binary}, {time, binary}])
@@ -295,41 +301,50 @@ check_line_range(#args{line=I, from_line=F, to_line=T}) ->
   ( not is_integer(F) orelse I >= F) andalso
   ((not is_integer(T) orelse I =< T)).
 
-check_filter(_Line,[])      -> true;
-check_filter(Line, Filters) ->
+check_filter(_Line,[],[])     -> true;
+check_filter(Line, In,Ex)     -> check_includes(Line, In) andalso check_excludes(Line, Ex).
+
+check_includes(Line, Filters) ->
   lists:dropwhile(
     fun(Filter) -> binary:match(Line, Filter) == nomatch end,
     Filters
   ) /= [].
 
-load_fix_variant(State = #args{app=App, filters=FF, mode=Mode}) ->
-  % Load the FIX variant for this file
-  Mode == nif andalso fix_nif:load_variant(App),
+check_excludes(Line, Filters) ->
+  lists:dropwhile(
+    fun(Filter) -> binary:match(Line, Filter) /= nomatch end,
+    Filters
+  ) == [].
 
+load_fix_variant(State = #args{app=App, filters=FF, excludes=EE, mode=Mode}) ->
+  % Load the FIX variant for this file
+  Mode  == nif andalso fix_nif:load_variant(App),
   % Get MsgType field atom ('MsgType' or 'Elixir.MsgType')
-  State1  = State#args{msg_type_tag = fix_nif:tag_to_field(App, 35)},
+  State1 = State#args{msg_type_tag = App:tag_to_field(Mode, 35)},
 
   % Update filters
-  Filters = lists:map(fun
-    G({K,V}) when is_binary(K) ->
-      Key =
-        try        _ = binary_to_integer(K), K
-        catch   _:_ ->
-          try          fix_nif:field_to_tag(App, K)
-          catch _:_ -> erlang:error(lists:flatten(
-            io_lib:format("Invalid key '~s' in filter (app=~w)", [K, App])))
-          end
-        end,
-      binary:compile_pattern(<<"|", Key/binary, "=", V/binary, "|">>);
+  Fun = fun(L) ->
+    lists:map(fun
+      G({K,V}) when is_binary(K) ->
+        Key =
+          try        _ = binary_to_integer(K), K
+          catch   _:_ ->
+            try          App:field_to_tag(K)
+            catch _:_ -> erlang:error(lists:flatten(
+              io_lib:format("Invalid key '~s' in filter (app=~w)", [K, App])))
+            end
+          end,
+        binary:compile_pattern(<<"|", Key/binary, "=", V/binary, "|">>);
 
-    G(Exp) when is_binary(Exp) ->
-      [K,V] =
-        try          binary:split(Exp, <<"=">>)
-        catch _:_ -> erlang:error("Argument -filter must be in format: Field=Value")
-        end,
-      G({K,V})
-  end, FF),
-  State1#args{filters=Filters}.
+      G(Exp) when is_binary(Exp) ->
+        [K,V] =
+          try          binary:split(Exp, <<"=">>)
+          catch _:_ -> erlang:error("Argument -filter must be in format: Field=Value")
+          end,
+        G({K,V})
+    end, L)
+  end,
+  State1#args{filters=Fun(FF), excludes=Fun(EE)}.
 
 missing(Arg) ->
   erlang:error(
@@ -416,7 +431,7 @@ load_paths() ->
   end.
 
 try_add_path(Path, Config, Home) ->
-  Path1 = replace_home(Path, Home),
+  Path1 = env:replace_env_vars(Path, [{"HOME", Home}]),
   case check_path(Path1) of
     {true, P} ->
       code:add_patha(P);
@@ -433,16 +448,3 @@ check_path2("nibe/"++_, Path) -> {true, Path};
 check_path2(_, Path) ->
   P = filename:join(Path, "ebin"),
   {filelib:is_dir(P), P}.
-
-replace_home(Path, Home) ->
-  case re:run(Path,
-      "(?|(?:\\$\\$)|(?:~[^/$]*)|(?:\\${[A-Za-z][A-Za-z_0-9]*})|(?:\\$[A-Za-z][A-Za-z_0-9]*))",
-      [global, {capture, all}])
-  of
-    {match, List} ->
-      lists:foldl(fun([{Pos,Len}], P) ->
-        string:substr(P, 1, Pos) ++ Home ++ string:substr(P, Pos+1+Len)
-      end, Path, List);
-    nomatch ->
-      Path
-  end.

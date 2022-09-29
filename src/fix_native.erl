@@ -8,7 +8,7 @@
 %%------------------------------------------------------------------------------
 -module(fix_native).
 
--export([split/2, split/3, encode_field/3]).
+-export([split/2, split/3, encode_field/3, tag_to_field/2, field_to_tag/2]).
 -export([decode_field/3, decode_field/4, decode_field/5]).
 -export([to_decimal/1, to_binary/1]).
 
@@ -90,6 +90,33 @@ decode_field2(DecoderMod, Key, Val, FloatAs, VP) when is_binary(Key), is_binary(
 encode_field(Codec, Tag, Val) when is_atom(Codec), is_atom(Tag) ->
   {_Num, _Type, Fun} = Codec:field_tag(Tag),
   Fun(Val).
+
+-spec tag_to_field(atom(), integer()) -> atom()|integer().
+tag_to_field(CodecMod, Tag) when is_integer(Tag) ->
+  case CodecMod:field(Tag) of
+    {Name, _Type, _Fun} -> Name;
+    false               -> Tag
+  end.
+
+-spec field_to_tag(atom(), atom()|binary()) -> binary()|atom().
+field_to_tag(CodecMod, Name) when is_atom(Name) ->
+  try
+    case CodecMod:field_tag(Name) of
+      {Nm, _Type, _Fun} -> integer_to_binary(Nm);
+      false             -> Name
+    end
+  catch error:{bad_field, _} ->
+    Name
+  end;
+field_to_tag(CodecMod, Name) when is_binary(Name) ->
+  try
+    field_to_tag(CodecMod, bin_to_atom(Name))
+  catch _:_ ->
+    Name
+  end.
+
+bin_to_atom(<<"Elixir.", _/binary>>=Bin) -> Bin;
+bin_to_atom(Bin) when is_binary(Bin)     -> binary_to_existing_atom(<<"Elixir.", Bin/binary>>).
 
 filter_field('Elixir.BeginString') -> false;
 filter_field('BeginString')        -> false;

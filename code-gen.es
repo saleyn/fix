@@ -496,6 +496,7 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "-module(", FN3, ").\n\n"
     "-export([init/0, init/1, variant/0]).\n"
     "-export([decode/1, split/1, encode/1, encode/3, encode/4, field/1]).\n"
+    "-export([tag_to_field/2, field_to_tag/2]).\n"
     "-export([encode_field_value/2, lookup_field_value/2]).\n"
     "-export([decode_field_value/2, decode_field_value/3]).\n"
     "-export([decode/2, decode/3, decode_msg/1, encode_msg/2, split/2, split/3]).\n"
@@ -635,6 +636,13 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
     "  [fix_nif:encode_field(?FIX_VARIANT, K, V) | encode_msg_nif(T)];\n"
     "encode_msg_nif([]) ->\n"
     "  [].\n"
+    "\n"
+    "-spec tag_to_field(nif|native, integer()) -> atom().\n"
+    "tag_to_field(Mode, Tag) ->\n"
+    "  fix_util:tag_to_field(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Tag).\n\n"
+    "-spec field_to_tag(nif|native, atom()|binary()) -> integer().\n"
+    "field_to_tag(Mode, Tag) ->\n"
+    "  fix_util:field_to_tag(Mode, ?FIX_ENCODER_MODULE, ?FIX_VARIANT, Tag).\n"
   ]),
   FldMap.
 
