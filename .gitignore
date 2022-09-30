@@ -1,7 +1,6 @@
 bin/
 ebin/
-priv/*.so
-priv/*.es
+priv/
 .eunit
 _build/
 deps/
