@@ -89,6 +89,8 @@ print(FixApp, #args{file=F, app=App, from_line=FL, line_count=LC} = Args)
       {ok, IO} ->
         try
           read_file(IO, State)
+        catch _:normal ->
+          ok
         after
           file:close(IO)
         end;
