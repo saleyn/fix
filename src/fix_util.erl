@@ -86,17 +86,17 @@ undump(Bin) when is_binary(Bin) ->
 dumpstr(Encoded) ->
   io:format("~s~n", [binary_to_list(dump(Encoded))]).
 
-tag_to_field(nif,   _CodecMod,  Variant, ID)    -> fix_nif:tag_to_field(Variant, ID);
-tag_to_field(native, CodecMod, _Variant, ID)    -> fix_native:tag_to_field(CodecMod, ID).
+tag_to_field(nif,   _CodecMod,  Variant, ID)     -> fix_nif:tag_to_field(Variant, ID);
+tag_to_field(native, CodecMod, _Variant, ID)     -> fix_native:tag_to_field(CodecMod, ID).
 
-field_to_tag(nif,   _CodecMod,  Variant, ID)    -> fix_nif:field_to_tag(Variant, ID);
-field_to_tag(native, CodecMod, _Variant, ID)    -> fix_native:field_to_tag(CodecMod, ID).
+field_to_tag(nif,   _CodecMod,  Variant, ID)     -> fix_nif:field_to_tag(Variant, ID);
+field_to_tag(native, CodecMod, _Variant, ID)     -> fix_native:field_to_tag(CodecMod, ID).
 
-do_split(nif,   _CodecMod,  Variant, Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
-do_split(native, CodecMod, _Variant, Bin, Opts) -> fix_native:split(CodecMod, Bin, Opts).
+do_split(nif,   _CodecMod,  Variant, Bin, Opts)  -> fix_nif:split(Variant, Bin, Opts);
+do_split(native, CodecMod, _Variant, Bin, Opts)  -> fix_native:split(CodecMod, Bin, Opts).
 
-split(nif,   _CodecMod, Variant,  Bin, Opts) -> fix_nif:split(Variant, Bin, Opts);
-split(native, CodecMod,_Variant, Bin,_Opts)  -> fix_native:split(CodecMod, Bin).
+split(nif,   _CodecMod, Variant, Bin, Opts)      -> fix_nif:split(Variant, Bin, Opts);
+split(native, CodecMod,_Variant, Bin, Opts)      -> fix_native:split(CodecMod, Bin, Opts).
 
 try_encode_val(ID, bool,   true)                 -> encode_tagval(ID, $Y);
 try_encode_val(ID, bool,   false)                -> encode_tagval(ID, $N);

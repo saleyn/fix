@@ -18,6 +18,9 @@
 -include_lib("kernel/include/file.hrl").
 -include_lib("stdlib/include/zip.hrl").
 
+-define(RWID, 22).
+-define(DWID, 45).
+
 -record(args, {
   file,
   xchg,
@@ -29,6 +32,7 @@
   mode          = nif   :: nif | native,
   line          = 1,
   errors        = 0,
+  printed,
   msg_type_tag,
   from_line     = 1,
   to_line,
@@ -267,35 +271,46 @@ print_line4({error, Error}, Line, _Fields, State) ->
   io:format("~.8.0w: Error decoding message: ~p\n  ~s\n", [State#args.line, Error, Line]),
   State#args{line = State#args.line+1, errors = State#args.errors+1};
 
-print_line4(Pfx, BMsg, Fields, #args{line=LineNo, xchg=Xchg, msg_type_tag=MTT, show_raw=Raw} = State) ->
+print_line4(Pfx, BMsg, Fields,
+            #args{line=LineNo, xchg=Xchg, msg_type_tag=MTT, show_raw=Raw, show_decoded=Dec} = State) ->
   MsgType =
     case lists:keyfind(MTT, 1, Fields) of
       {_, Val, _, _} -> Val;
       false          -> ""
     end,
   ML   = lists:foldl(fun(T,S) -> max(length(val(element(1,T))),S) end, 25, Fields),
-  RWid = 22,
-  Sep  = hpad("", 11+ML+5+11+16 + (if Raw -> RWid+3+3; true -> 0 end)),
+  Sep  = sep(State),
   io:format("~ts\n~.8.0w: ~s~s: ~s\n", [Sep, LineNo, Pfx, Xchg, val(MsgType)]),
   {Fmt, Args} =
-    if Raw ->
-      io:format("──No─┬───Tag─┬─~ts─┬─~ts─┬─~ts\n",
-               [hpad("Field", ML), hpad("Binary Value", RWid+3), hpad("Decoded Value", 25)]),
-      {"  ~.2.0w │ ~.5w │ ~.*s │ ~-*s~s │ ~s\n",
-       fun(I,Tag,K,V,{_,Len}=PosLen) ->
-         [I,Tag,ML,K, RWid,binary:part(BMsg, PosLen), if Len>RWid -> "..."; true -> "   " end, V]
-       end};
-    true ->
-      io:format("──No─┬───Tag─┬─~ts─┬─~ts\n",
-               [hpad("Field", ML), hpad("Decoded Value", 25)]),
-      {"  ~.2.0w │ ~.5w │ ~.*s │ ~s\n",
-       fun(I,Tag,K,V,_PosLen) -> [I,Tag,ML,K,V] end}
+    case {Raw, Dec} of
+      {true, true} ->
+        io:format("──No─┬───Tag─┬─~ts─┬─~ts─┬─~ts\n",
+                 [hpad("Field", ML), hpad("Binary Value", ?RWID+3), hpad("Decoded Value", ?DWID)]),
+        {"  ~.2.0w │ ~.5w │ ~.*s │ ~-*s~s │ ~s\n",
+         fun(I,Tag,K,V,{_,Len}=PosLen) ->
+           [I,Tag,ML,K, ?RWID,binary:part(BMsg, PosLen), if Len>?RWID -> "..."; true -> "   " end, V]
+         end};
+      {false, true} ->
+        io:format("──No─┬───Tag─┬─~ts─┬─~ts\n", [hpad("Field", ML), hpad("Decoded Value", ?DWID)]),
+        {"  ~.2.0w │ ~.5w │ ~.*s │ ~s\n", fun(I,Tag,K,V,_PosLen) -> [I,Tag,ML,K,V] end};
+      {true, false} ->
+        io:format("──No─┬───Tag─┬─~ts─┬─~ts\n", [hpad("Field", ML), hpad("Raw Value", ?DWID)]),
+        {"  ~.2.0w │ ~.5w │ ~.*s │ ~s\n", fun(I,Tag,K,_V,PosLen) -> [I,Tag,ML,K,binary:part(BMsg, PosLen)] end}
     end,
   lists:foldl(fun({K,V,Tag,PosLen}, I) ->
     io:format(Fmt, Args(I, Tag, val(K), val(V,BMsg), PosLen)),
     I+1
   end, 1, Fields),
-  State#args{line = LineNo+1}.
+  State#args{line = LineNo+1, printed = ML}.
+
+sep(#args{printed = Printed, show_raw=Raw, show_decoded=Dec}) ->
+  {S,N} = if Printed == undefined -> {"─",0}; true -> {"┴",Printed} end,
+  Sep0  = if Raw and Dec -> [?RWID+2+3, ?DWID+1];
+             not Raw     -> [?DWID+1];
+             not Dec     -> [?DWID+1];
+             true        -> []
+          end,
+  string:join([string:copies("─", I) || I <- ([5, 7, 2+N] ++ Sep0)], S).
 
 check_line_range(#args{line=I, from_line=F, to_line=T}) ->
   ( not is_integer(F) orelse I >= F) andalso
@@ -386,12 +401,20 @@ to_bin(S)  when is_list(S)   -> list_to_binary(S);
 to_bin(S)  when is_binary(S) -> S.
 
 read_file(IO, State) ->
+  case read_file2(IO, State) of
+    #args{printed=undefined} ->
+      ok;
+    S ->
+      io:format("~ts\n", [sep(S)])
+  end.
+
+read_file2(IO, State) ->
 	case file:read_line(IO) of
 		{ok, Line} ->
 			State1 = print_line(Line, State),
-			read_file(IO, State1);
+			read_file2(IO, State1);
 		eof ->
-			ok
+			State
 	end.
 
 load_paths() ->
