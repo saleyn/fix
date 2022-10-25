@@ -1869,7 +1869,8 @@ do_decode_value
 
       n = sign * n;
 
-      if (i > max_len) [[unlikely]]
+      // If the result of conversion changed the sign of int, leave it as binary
+      if (i > max_len || ((n < 0) ^ (sign > 0))) [[unlikely]]
         double_fmt = DoubleFmt::Binary;
 
       switch (double_fmt) {
