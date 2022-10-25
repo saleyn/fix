@@ -1841,7 +1841,8 @@ do_decode_value
     }
 
     case DataType::DOUBLE: {
-      long n=0, sign=1, i=0, max_len=19;
+      uint64_t n=0;
+      long     sign=1, i=0, max_len=19;
 
       if (p < end && *p == '-') [[unlikely]] {
         sign = -1;
@@ -1867,10 +1868,8 @@ do_decode_value
         }
       }
 
-      n = sign * n;
-
-      // If the result of conversion changed the sign of int, leave it as binary
-      if (i > max_len || ((n < 0) ^ (sign > 0))) [[unlikely]]
+      // If the long value results in the integer overflow, leave it as binary
+      if (i > max_len || n > ((1ul << 63) - 1)) [[unlikely]]
         double_fmt = DoubleFmt::Binary;
 
       switch (double_fmt) {
@@ -1886,7 +1885,7 @@ do_decode_value
         }
         case DoubleFmt::Decimal:
           value = enif_make_tuple3(env, am_decimal,
-                    enif_make_long(env, n), enif_make_long(env, i - tmp));
+                    enif_make_long(env, sign * int64_t(n)), enif_make_long(env, i - tmp));
           break;
         case DoubleFmt::String:
           value = enif_make_string_len(env, (const char*)ptr, p-ptr, ERL_NIF_LATIN1);
