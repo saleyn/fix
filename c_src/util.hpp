@@ -513,6 +513,22 @@ private:
   std::string m_name;
 };
 
+template<int N> struct pow10    { static constexpr uint64_t value = 10 * pow10<N-1>::value; };
+template <>     struct pow10<0> { static constexpr uint64_t value = 1; };
+
+inline uint64_t quick_pow10(size_t n) {
+  assert(n < 20);
+  static uint64_t s_table[] = {
+    pow10< 0>::value, pow10< 1>::value, pow10< 2>::value, pow10< 3>::value,
+    pow10< 4>::value, pow10< 5>::value, pow10< 6>::value, pow10< 7>::value,
+    pow10< 8>::value, pow10< 9>::value, pow10<10>::value, pow10<11>::value,
+    pow10<12>::value, pow10<13>::value, pow10<14>::value, pow10<15>::value,
+    pow10<16>::value, pow10<17>::value, pow10<18>::value, pow10<19>::value,
+  };
+
+  return s_table[n];
+}
+
 //------------------------------------------------------------------------------
 // Main FIX variant creation function
 //------------------------------------------------------------------------------
@@ -535,9 +551,12 @@ const Ch* str_to_int(const Ch* s, const Ch* end, T& res, char delim = '\0', char
   T sign   = 1;
   T n      = 0;
   auto beg = s;
-  if (s < end && *s == '-') {
-    sign   = -1;
-    s++;
+  if (s < end) [[likely]] {
+    if (*s == '-') {
+      sign   = -1;
+      ++s;
+    } else if (*s == '+') [[unlikely]]
+      ++s;
   }
   for (; s != end && *s >= '0' && *s <= '9'; ++s)
     n = n*10 + (*s - '0');
@@ -1841,36 +1860,47 @@ do_decode_value
     }
 
     case DataType::DOUBLE: {
-      uint64_t n=0;
-      long     sign=1, i=0, max_len=19;
+      uint64_t n=0, f=0;
+      long     sign=1, i=0;
 
-      if (p < end && *p == '-') [[unlikely]] {
-        sign = -1;
-        ++i;
-        ++max_len;
-        ++p;
+      if (p < end) [[likely]] {
+        if (*p == '-') [[unlikely]] {
+          sign = -1;
+          ++p;
+        } else if (*p == '+') [[unlikely]]
+          ++p;
       }
 
       for(; p < end && *p >= '0' && *p <= '9'; ++p, ++i)
         n = n*10 + (*p - '0');
 
-      long   tmp  = i;
-      double mant = n, frac = 0, coeff = 1.0;
+      long flen = 0;
 
-      if (p != end) {
-        if (*p == '.') {
-          // ++p skips '.'
-          for(++p; p<end && *p >= '0' && *p <= '9'; ++i,++p) {
-            n      = n*10 + (*p - '0');
-            coeff *= 0.1;
-            frac  += (*p - '0')*coeff;
-          }
+      if (p != end) [[likely]] {
+        if (*p == '.') [[likely]] {
+          auto q = ++p; // ++p skips '.'
+
+          for(; p<end && *p >= '0' && *p <= '9'; ++p)
+            f = f*10 + (*p - '0');
+
+          flen = p - q; // Length of fractional part
+          i   += flen;  // Total # of digits
         }
       }
 
+      const auto s_max_len = 19;
+      const auto s_max     = (1ull << 63) - 1;
+
+      uint64_t mant;
+
       // If the long value results in the integer overflow, leave it as binary
-      if (i > max_len || n > ((1ul << 63) - 1)) [[unlikely]]
+      if (i > s_max_len) [[unlikely]]
         double_fmt = DoubleFmt::Binary;
+      else {
+        mant = quick_pow10(flen)*n + f;
+        if (mant > s_max) [[unlikely]]
+          double_fmt = DoubleFmt::Binary;
+      }
 
       switch (double_fmt) {
         case DoubleFmt::Binary: {
@@ -1885,15 +1915,16 @@ do_decode_value
         }
         case DoubleFmt::Decimal:
           value = enif_make_tuple3(env, am_decimal,
-                    enif_make_long(env, sign * int64_t(n)), enif_make_long(env, i - tmp));
+                    enif_make_long(env, sign * int64_t(mant)), enif_make_long(env, flen));
           break;
         case DoubleFmt::String:
           value = enif_make_string_len(env, (const char*)ptr, p-ptr, ERL_NIF_LATIN1);
           break;
         case DoubleFmt::Double:
         default: {
-          double res = double(mant*sign) + (sign < 0 ? -frac : +frac);
-          value      = enif_make_double(env, res);
+          double frac = double(f) / quick_pow10(flen);
+          double res  = (double(mant) + frac) * sign;
+          value       = enif_make_double(env, res);
           break;
         }
       }
