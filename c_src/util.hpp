@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cassert>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <tuple>
@@ -211,7 +212,8 @@ enum class DoubleFmt {
   Double,
   Decimal,
   Binary,
-  String
+  String,
+  BigIntDecimal
 };
 
 enum class TimeFmt {
@@ -628,6 +630,83 @@ Ch* decimal_to_str(long magnitude, int prec, Ch (&buf)[N], U& size)
             : snprintf(tmp, N, "%ld.%0*ld", mm, prec, pp));
   return buf;
 }
+
+struct MagnitudeBigInt {
+  // Creates a BigInteger Erlang term that corresponds to the magnitude
+  // of a number encoded in a string.  E.g. "123.45678901234567890123"
+  // will be returned as a BigInt 12345678901234567890123.
+  static ERL_NIF_TERM
+  encode(ErlNifEnv* env, int sign, const unsigned char* begin, const unsigned char* end)
+  {
+    std::vector<unsigned char> result;
+    result.reserve(4 + approx_digits(end - begin));
+    result.push_back(131);         // Version byte
+    result.push_back(110);         // Small BIG integer
+    result.push_back(0);           // Length placeholder
+    result.push_back(sign < 0);    // Sign byte
+    convert_to_base256(result, result.begin()+4, (const char*)begin, (const char*)end);
+    result[2] = result.size() - 4; // Update byte length
+    std::cout << "BigInt(" << std::string((const char*)begin, end-begin) << "):";
+    for (auto it=result.begin(); it != result.end(); ++it)
+      std::cout << ' ' << *it;
+    std::cout << "\r\n";
+
+    ERL_NIF_TERM out;
+    auto data = &*result.begin();
+    if (!enif_binary_to_term(env, data, result.size(), &out, 0)) [[unlikely]]
+      return 0;
+    return out;
+  }
+
+private:
+  static void convert_to_base256(
+    std::vector<unsigned char>& result,
+    std::vector<unsigned char>::iterator it,
+    const char* begin, const char* end)
+  {
+    result.push_back(*begin++ - '0');
+
+    for(; begin != end; ++begin)
+    {
+      if (*begin == '.') [[unlikely]] continue; // skip the '.'
+      mul10(result, it);           // multiply result by 10
+      add(result, it, *begin-'0'); // add current digit
+    }
+  }
+
+  static size_t approx_digits(size_t decimal_dig_count) {
+    const auto factor = std::log(10) / std::log(256);
+    return std::ceil(factor * decimal_dig_count);
+  }
+
+  static void add(
+    std::vector<unsigned char>& num,
+    std::vector<unsigned char>::iterator start,
+    int digit
+  ) {
+    for (auto end=num.end(); digit && start != end; ++start) {
+      int x  = *start + digit;
+      *start = x & 255;
+      digit  = x >> 8;
+    }
+    if (digit)
+      num.push_back(digit);
+  }
+
+  static void mul10(
+    std::vector<unsigned char>& num,
+    std::vector<unsigned char>::iterator start
+  ) {
+    auto carry = 0;
+    for (auto end=num.end(); start != end; ++start) {
+      carry   = 10 * *start + carry;
+      *start  = static_cast<uint8_t>(carry);
+      carry >>= 8;
+    }
+    if (carry)
+      num.push_back(carry);
+  }
+};
 
 inline std::unique_ptr<ERL_NIF_TERM, void(*)(ERL_NIF_TERM*)>
 unique_term_ptr(void* ptr)
@@ -1895,11 +1974,11 @@ do_decode_value
 
       // If the long value results in the integer overflow, leave it as binary
       if (i > s_max_len) [[unlikely]]
-        double_fmt = DoubleFmt::Binary;
+        double_fmt = DoubleFmt::BigIntDecimal;
       else {
         mant = quick_pow10(flen)*n + f;
         if (mant > s_max) [[unlikely]]
-          double_fmt = DoubleFmt::Binary;
+          double_fmt = DoubleFmt::BigIntDecimal;
       }
 
       switch (double_fmt) {
@@ -1916,6 +1995,10 @@ do_decode_value
         case DoubleFmt::Decimal:
           value = enif_make_tuple3(env, am_decimal,
                     enif_make_long(env, sign * int64_t(mant)), enif_make_long(env, flen));
+          break;
+        case DoubleFmt::BigIntDecimal:
+          value = enif_make_tuple3(env, am_decimal,
+                    MagnitudeBigInt::encode(env, sign, ptr, p), enif_make_long(env, flen));
           break;
         case DoubleFmt::String:
           value = enif_make_string_len(env, (const char*)ptr, p-ptr, ERL_NIF_LATIN1);
