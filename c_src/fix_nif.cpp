@@ -918,6 +918,27 @@ pathftime_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   return str_to_term(env, is_bin, s.c_str(), s.size());
 }
 
+static ERL_NIF_TERM
+magnitude_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+  unsigned char buf[1024];
+  if (argc != 1 || !enif_get_string(env, argv[0], (char*)buf, sizeof(buf), ERL_NIF_LATIN1)) [[unlikely]]
+    return enif_make_badarg(env);
+
+  if (buf[0] == '\0')
+    return enif_make_badarg(env);
+
+  auto n = strlen((char*)buf);
+  auto p = buf;
+  auto sign = buf[0] == '-' ? -1 : buf[0] == '+' ? 1 : 0;
+
+  if (sign) ++p;
+
+  auto res = MagnitudeBigInt::encode(env, sign, p, buf+n);
+
+  return res ? res : enif_make_badarg(env);
+}
+
 //------------------------------------------------------------------------------
 // Utility functions
 //------------------------------------------------------------------------------
@@ -1110,6 +1131,7 @@ static ErlNifFunc fix_nif_funcs[] =
   {"strftime",              3, strftime_nif},
   {"pathftime",             2, pathftime_nif},
   {"pathftime",             3, pathftime_nif},
+  {"magnitude",             1, magnitude_nif},
 };
 
 ERL_NIF_INIT(fix_nif, fix_nif_funcs, load, nullptr, upgrade, unload)

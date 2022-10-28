@@ -632,8 +632,8 @@ Ch* decimal_to_str(long magnitude, int prec, Ch (&buf)[N], U& size)
 }
 
 struct MagnitudeBigInt {
-  // Creates a BigInteger Erlang term that corresponds to the magnitude
-  // of a number encoded in a string.  E.g. "123.45678901234567890123"
+  // Creates a small BigInteger (< 256 digits) Erlang term that corresponds to
+  // the magnitude of a number encoded in a string.  E.g. "123.45678901234567890123"
   // will be returned as a BigInt 12345678901234567890123.
   static ERL_NIF_TERM
   encode(ErlNifEnv* env, int sign, const unsigned char* begin, const unsigned char* end)
@@ -645,11 +645,12 @@ struct MagnitudeBigInt {
     result.push_back(0);           // Length placeholder
     result.push_back(sign < 0);    // Sign byte
     convert_to_base256(result, result.begin()+4, (const char*)begin, (const char*)end);
-    result[2] = result.size() - 4; // Update byte length
-    std::cout << "BigInt(" << std::string((const char*)begin, end-begin) << "):";
-    for (auto it=result.begin(); it != result.end(); ++it)
-      std::cout << ' ' << *it;
-    std::cout << "\r\n";
+    auto size = result.size() - 4; // Get byte length
+
+    if (size > 255) [[unlikely]]
+      return 0;
+
+    result[2] = size;              // Update byte length
 
     ERL_NIF_TERM out;
     auto data = &*result.begin();
@@ -1969,19 +1970,32 @@ do_decode_value
 
       const auto s_max_len = 19;
       const auto s_max     = (1ull << 63) - 1;
-
-      uint64_t mant;
+      uint64_t   mant      = 0;
 
       // If the long value results in the integer overflow, leave it as binary
-      if (i > s_max_len) [[unlikely]]
-        double_fmt = DoubleFmt::BigIntDecimal;
-      else {
-        mant = quick_pow10(flen)*n + f;
-        if (mant > s_max) [[unlikely]]
+      if (double_fmt == DoubleFmt::Decimal) {
+        if (i > s_max_len) [[unlikely]]
           double_fmt = DoubleFmt::BigIntDecimal;
+        else {
+          mant = quick_pow10(flen)*n + f;
+          if (mant > s_max) [[unlikely]]
+            double_fmt = DoubleFmt::BigIntDecimal;
+        }
       }
 
       switch (double_fmt) {
+        case DoubleFmt::Decimal:
+          value = enif_make_tuple3(env, am_decimal,
+                    enif_make_long(env, sign * int64_t(mant)), enif_make_long(env, flen));
+          break;
+        case DoubleFmt::BigIntDecimal: {
+          auto m = MagnitudeBigInt::encode(env, sign, ptr, p);
+          if (m != 0) [[likely]] {
+            value = enif_make_tuple3(env, am_decimal, m, enif_make_long(env, flen));
+            break;
+          }
+          [[fallthrough]]; // if couldn't convert - fall through to the binary representation
+        }
         case DoubleFmt::Binary: {
           auto sz   = p - ptr;
           auto data = enif_make_new_binary(env, sz, &value);
@@ -1992,14 +2006,6 @@ do_decode_value
           memcpy(data, ptr, sz);
           break;
         }
-        case DoubleFmt::Decimal:
-          value = enif_make_tuple3(env, am_decimal,
-                    enif_make_long(env, sign * int64_t(mant)), enif_make_long(env, flen));
-          break;
-        case DoubleFmt::BigIntDecimal:
-          value = enif_make_tuple3(env, am_decimal,
-                    MagnitudeBigInt::encode(env, sign, ptr, p), enif_make_long(env, flen));
-          break;
         case DoubleFmt::String:
           value = enif_make_string_len(env, (const char*)ptr, p-ptr, ERL_NIF_LATIN1);
           break;

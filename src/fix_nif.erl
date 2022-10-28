@@ -22,6 +22,7 @@
 -export([checksum/1,  update_checksum/1]).
 -export([strftime/2,  strftime/3]).
 -export([pathftime/2, pathftime/3]).
+-export([magnitude/1]).
 
 -include("fix.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -287,6 +288,13 @@ encode_timestamp(_Value, _UTC, _Resolution) ->
 checksum(_Bin) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
 
+%% @doc Convert a floating point number stored in a string to an integer magnitude.
+%% The number must be under 256 digits. E.g. "123.456" -> 123456.  Supports positive
+%% and negative numbers.
+-spec magnitude(string()) -> integer().
+magnitude(_Str) ->
+  erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).
+
 %% @doc Performs DESTRUCTIVE update of the binary with FIX checksum.
 %% The argument must be a FIX encoded binary with a trailer ending with
 %% "10=...\x1".  The function will overwrite the "..." with the checksum.
@@ -332,6 +340,13 @@ pathftime_test() ->
   ?assertEqual(H1, fix_nif:pathftime("~/%Y-%m-%d.%H:%M:%S.tmp", 1646096223)),
   ?assertEqual(H2, fix_nif:pathftime("~/%Y-%m-%d.%H:%M:%S.tmp", 1646096223, local)),
   ok.
+
+magnitude_test() ->
+  123456789012345678901234 = fix_nif:magnitude("12345.6789012345678901234"),
+  12345                    = fix_nif:magnitude("+12.345"),
+  -12345                   = fix_nif:magnitude("-12.345"),
+  12345                    = fix_nif:magnitude("12345."),
+  12345                    = fix_nif:magnitude("12345").
 
 split_and_checksum_test() ->
   HBeatP    = <<"8=FIX.4.0|9=58|35=0|49=BuySide|56=SellSide|34=5|52=20190605-11:57:29.363|10=999|">>,
