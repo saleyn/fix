@@ -1081,10 +1081,10 @@ ERL_NIF_TERM make_encode_error
   char buf[256];
   auto len = snprintf(buf, sizeof(buf),
                       "Cannot encode FIX field '%s': ", fld->name());
-  #pragma gcc diagnostic push
-  #pragma gcc diagnostic ignored "-Wformat-security"
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wformat-security"
   len += snprintf(buf+len, sizeof(buf)-len, err, std::forward<Args>(args)...);
-  #pragma gcc diagnostic pop
+  #pragma GCC diagnostic pop
 
   auto reason = create_binary(env, buf, len);
 
