@@ -4,7 +4,7 @@ defmodule FIX.MixProject do
   def project do
     [
       app:             :fix,
-      version:         get_version(),
+      version:         "1.0.6",
       elixir:          "~> 1.13",
       start_permanent: Mix.env() == :prod,
       deps:            deps(),
@@ -30,13 +30,13 @@ defmodule FIX.MixProject do
     ]
   end
 
-  defp get_version() do
-    System.cmd("git", ~w{describe --always --tags --first-parent})
-    |> elem(0)
-    |> String.trim
-    |> String.replace_leading("v", "")
-    |> String.replace(~r/-.*$/, "")
-  end
+  #defp get_version() do
+  #  System.cmd("git", ~w{describe --always --tags --first-parent})
+  #  |> elem(0)
+  #  |> String.trim
+  #  |> String.replace_leading("v", "")
+  #  |> String.replace(~r/-.*$/, "")
+  #end
 
   #defp escript() do
   #  outdir  = Keyword.get(Mix.Project.config(), :app_path, File.cwd!)
