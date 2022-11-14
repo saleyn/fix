@@ -1071,11 +1071,11 @@ make_decode_error(
           create_binary(env,  err_loc)));
 }
 
-template <int N, int M, typename... Args>
+template <int N, typename... Args>
 ERL_NIF_TERM make_encode_error
 (
   const char (&src)[N], Field const* fld, ErlNifEnv* env,
-  const char (&err)[M], Args&&... args
+  const char err[], Args&&... args
 )
 {
   char buf[256];

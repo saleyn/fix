@@ -35,7 +35,7 @@ defmodule FIX.MixProject do
     |> elem(0)
     |> String.trim
     |> String.replace_leading("v", "")
-    |> String.replace("-", ".", global: false)
+    |> String.replace(~r/-.*$/, "")
   end
 
   #defp escript() do
