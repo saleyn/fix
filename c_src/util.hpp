@@ -515,17 +515,17 @@ private:
   std::string m_name;
 };
 
-template<int N> struct pow10    { static constexpr uint64_t value = 10 * pow10<N-1>::value; };
-template <>     struct pow10<0> { static constexpr uint64_t value = 1; };
+template<int N> struct power10    { static constexpr uint64_t value = 10 * power10<N-1>::value; };
+template<>      struct power10<0> { static constexpr uint64_t value = 1; };
 
 inline uint64_t quick_pow10(size_t n) {
   assert(n < 20);
   static uint64_t s_table[] = {
-    pow10< 0>::value, pow10< 1>::value, pow10< 2>::value, pow10< 3>::value,
-    pow10< 4>::value, pow10< 5>::value, pow10< 6>::value, pow10< 7>::value,
-    pow10< 8>::value, pow10< 9>::value, pow10<10>::value, pow10<11>::value,
-    pow10<12>::value, pow10<13>::value, pow10<14>::value, pow10<15>::value,
-    pow10<16>::value, pow10<17>::value, pow10<18>::value, pow10<19>::value,
+    power10< 0>::value, power10< 1>::value, power10< 2>::value, power10< 3>::value,
+    power10< 4>::value, power10< 5>::value, power10< 6>::value, power10< 7>::value,
+    power10< 8>::value, power10< 9>::value, power10<10>::value, power10<11>::value,
+    power10<12>::value, power10<13>::value, power10<14>::value, power10<15>::value,
+    power10<16>::value, power10<17>::value, power10<18>::value, power10<19>::value,
   };
 
   return s_table[n];

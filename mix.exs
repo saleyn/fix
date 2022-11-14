@@ -4,7 +4,7 @@ defmodule FIX.MixProject do
   def project do
     [
       app:             :fix,
-      version:         "1.0.0",
+      version:         get_version(),
       elixir:          "~> 1.13",
       start_permanent: Mix.env() == :prod,
       deps:            deps(),
@@ -28,6 +28,14 @@ defmodule FIX.MixProject do
       {:etran,       "~> 0.3",   runtime: false},
       {:util,        "~> 1.0"},
     ]
+  end
+
+  defp get_version() do
+    System.cmd("git", ~w{describe --always --tags --first-parent})
+    |> elem(0)
+    |> String.trim
+    |> String.replace_leading("v", "")
+    |> String.replace("-", ".", global: false)
   end
 
   #defp escript() do
@@ -61,7 +69,8 @@ defmodule Mix.Tasks.Compile.Escript do
       {:filename.basename(ff), File.read!(ff)}
     end
     outdir   = Keyword.get(Mix.Project.config(), :app_path, File.cwd!)
-    escript  = System.get_env("ESCRIPT",   "escript")
+    erts_vsn = :erlang.system_info(:version) |> to_string
+    escript  = System.get_env("ESCRIPT", "escript") |> String.replace("{{ERTS_VERSION}}", erts_vsn)
     filename = Path.join(outdir, "priv/fixdump")
     args     = System.get_env("FIXDUMP_ENV", "")
     :ok      = filename |> String.to_charlist |> :escript.create([
