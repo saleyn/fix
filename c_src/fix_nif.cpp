@@ -353,6 +353,7 @@ decode_field_value_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     switch (field->dtype()) {
       case DataType::DOUBLE:    dt = am_float; return true;
       case DataType::DATETIME:  dt = am_time;  return true;
+      case DataType::DATETIMEZ: dt = am_time;  return true;
       default:                                 return false;
     }
   };
@@ -652,14 +653,16 @@ decode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 }
 
 // Args:
-// 1. Timestamp :: integer()  - Usec or Msec from epoch
-// 2. utc|local :: atom()     - 'utc' if UTC time, 'local' if local time
+// 1. Timestamp :: integer()          - Usec or Msec from epoch
+// 2. utc|local :: atom() | integer() - 'utc' if UTC time, 'local' if local time,
+//                                      or integer() UTC offset is seconds
 // 3. sec|us|ms :: atom()     - seconds (default), microseconds, milliseconds
 static ERL_NIF_TERM
 encode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
   auto utc = true;
   ErlNifUInt64  t;
+  int  utc_offset = -1;
 
   static_assert(sizeof(t) == sizeof(uint64_t));
 
@@ -677,7 +680,9 @@ encode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
       return enif_make_badarg(env);
     else if (enif_is_identical(argv[1], am_local))
       utc = false;
-    else if (!enif_is_identical(argv[1], am_utc))
+    else if (enif_is_identical(argv[1], am_utc))
+      utc = true;
+    else if (!enif_get_int(env, argv[1], &utc_offset))
       return enif_make_badarg(env);
 
     if (argc == 3) {
@@ -694,7 +699,8 @@ encode_timestamp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     }
   }
 
-  return encode_timestamp(env, t, ts_type, utc);
+  return utc_offset < 0 ? encode_timestamp (env, t, ts_type, utc)
+                        : encode_timestampz(env, t, ts_type, utc_offset);
 }
 
 // Calculate the FIX checksum of a binary message body

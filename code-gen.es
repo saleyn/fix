@@ -29,31 +29,31 @@
 -record(state, {
   file,
   doc,
-  outdir   = ".",
-  save     = false,
-  quiet    = false,
-  debug    = 0,
-  schema   = "fix.schema",
-  config   = "fix.config",
-  elixir   = false,
-  cpp_path = "c_src",
-  erl_path = "src",
+  outdir      = ".",
+  save        = false,
+  quiet       = false,
+  debug       = 0,
+  schema      = "fix.schema",
+  config      = "fix.config",
+  elixir      = false,
+  cpp_path    = "c_src",
+  erl_path    = "src",
   elixir_path = "src",
-  app_descr= "",
+  app_descr   = "",
   version,
-  variants = [],      %% FIX Variant Name
+  variants    = [],      %% FIX Variant Name
   file_sfx,
-  variant  = "",      %% FIX Variant Name (required argument)
-  var_pfx  = "",      %% FIX variant prefix in lower case
-  var_sfx  = "",      %% FIX variant suffix in lower case
-  gen      = []  :: [erlang | elixir | cpp | build],
-  inc_path = "include",
-  hpp_path = ["../deps/fix/c_src"],
-  src_dir  = filename:dirname(filename:absname(escript:script_name())),
-  cur_dir  = filename:absname(""),  %% Current directory
-  base_dir = false,   %% Is this generator invoked in the 'fix' project's dir?
+  variant     = "",      %% FIX Variant Name (required argument)
+  var_pfx     = "",      %% FIX variant prefix in lower case
+  var_sfx     = "",      %% FIX variant suffix in lower case
+  gen         = []  :: [erlang | elixir | cpp | build],
+  inc_path    = "include",
+  hpp_path    = ["../deps/fix/c_src"],
+  src_dir     = filename:dirname(filename:absname(escript:script_name())),
+  cur_dir     = filename:absname(""),  %% Current directory
+  base_dir    = false,   %% Is this generator invoked in the 'fix' project's dir?
   copyrt,
-  copyyr   = integer_to_list(element(1, date()))
+  copyyr      = integer_to_list(element(1, date()))
 }).
 
 %%%-----------------------------------------------------------------------------
@@ -222,9 +222,12 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
             ,'EXCHANGE'           => string
             ,'FLOAT'              => float
             ,'INT'                => int
+            ,'LANGUAGE'           => string
             ,'LENGTH'             => length
             ,'LOCALMKTDATE'       => string
             ,'MONTHYEAR'          => string
+            ,'MULTIPLECHARVALUE'  => string
+            ,'MULTIPLESTRINGVALUE'=> string
             ,'MULTIPLEVALUESTRING'=> string
             ,'NUMINGROUP'         => group
             ,'PERCENTAGE'         => float
@@ -233,10 +236,14 @@ generate_fields(Fields, FldMap, #state{var_sfx=SFX} = State) ->
             ,'QTY'                => float
             ,'SEQNUM'             => int
             ,'STRING'             => string
+            ,'TAGNUM'             => int
+            ,'TZTIMEONLY'         => string
+            ,'TZTIMESTAMP'        => datetz
             ,'UTCDATE'            => datetm
             ,'UTCDATEONLY'        => datetm
             ,'UTCTIMEONLY'        => datetm
             ,'UTCTIMESTAMP'       => datetm
+            ,'XMLDATA'            => binary
           },
   [maps:find(T, MapDT) == error andalso throw("Found unknown field type: " ++ atom_to_list(T))
    || T <- Types],
@@ -786,7 +793,7 @@ generate_meta_and_parser(Header, Messages, _AllMsgGrps, FldMap, #state{var_sfx=S
         MWD  = lists:max([length(atom_to_list(M)) || {M, _T, _C, _FF} <- Messages]),
         MWDe = lists:max([length(atom_name(M,State)) || {M, _T, _C, _FF} <- Messages]),
         Flds = [{GrpOrFld, get_attr(name,A)} || {GrpOrFld, A,_F} <- Fields],
-        MFW  = lists:max([length(sq(N)) || {_, N} <- Flds]),
+        MFW  = iif(Flds == [], 0, lists:max([length(sq(N)) || {_, N} <- Flds])),
         %MGW  = iif(Grps==[], 0, lists:max([length(atom_to_list(group_name(G))) || G <- Grps])),
         MsgName = atom_to_list(Msg),
         [
@@ -1260,7 +1267,8 @@ dtype(bool)    -> "DataType::BOOL";
 dtype(char)    -> "DataType::CHAR";
 dtype(string)  -> "DataType::STRING";
 dtype(binary)  -> "DataType::BINARY";
-dtype(datetm)  -> "DataType::DATETIME".
+dtype(datetm)  -> "DataType::DATETIME";
+dtype(datetz)  -> "DataType::DATETIMEZ".
 
 atom_name(N, S, I)                     when is_atom(N) -> atom_name(atom_to_list(N), S, I);
 %atom_name(N, #state{elixir = true},35) when is_list(N) -> "Elixir.FIX." ++ N;
@@ -1447,7 +1455,9 @@ generate_build_files(#state{src_dir  = SrcDir,  outdir   = Cwd,
           "  end\n"
           "end\n"
         ])
-    end
+    end;
+  true ->
+    ok
   end,
   Rebar = "./rebar.config",
   case filelib:is_regular(Rebar) of
@@ -1496,8 +1506,10 @@ generate_build_files(#state{src_dir  = SrcDir,  outdir   = Cwd,
         "generate: deps/fix/code-gen.es spec/", State#state.variant, ".fix.xml\n"
         "\t$< -f $(word $^,2) -var ", State#state.variant,
         " -c fix_", State#state.variant, ".config -e \\n"
-        "    -a \"", State#state.app_descr, "\" -cr \"", State#state.copyrt,"\"",
-        "    -sfx \"", State#state.file_sfx, "\"\n\n"
+        "    -a \"", State#state.app_descr, "\"",
+        iif(State#state.copyrt   == undefined, [], " -cr \""++State#state.copyrt++"\""),
+        iif(State#state.file_sfx == undefined, [], " -sfx \""++State#state.file_sfx++"\""),
+        "\n\n"
         "c_src src include:\n"
         "\tmkdir -p $@\n\n"
         ".PHONY: deps\n"

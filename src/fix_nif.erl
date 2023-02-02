@@ -132,9 +132,10 @@ decode_field_value(Variant, Field, Value) ->
   decode_field_value(Variant, Field, Value, nil).
 
 -spec decode_field_value(atom(), atom()|binary()|string()|integer(), binary(),
-        nil|                                       %% Default value decoding
-        number|decimal|string|binary|              %% Alternative float decoding
-        epoch_usec|epoc_msec|epoch_sec|naive|tuple %% Alternative time decoding
+        nil|                            %% Default value decoding
+        number|decimal|string|binary|   %% Alternative float decoding
+        epoch_usec|epoc_msec|epoch_sec|
+        naive|tuple                     %% Alternative time decoding
       ) -> any().
 decode_field_value(_Variant, _Field, _Value, _Format) ->
   erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]}).

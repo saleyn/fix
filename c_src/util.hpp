@@ -120,6 +120,7 @@ struct DataType {
     BOOL,
     STRING,
     DATETIME,
+    DATETIMEZ,
     GROUP,
     BINARY,
     __LAST,  // Helper, must be last enum
@@ -137,6 +138,7 @@ struct DataType {
       "bool",
       "string",
       "datetime",
+      "datetimez",
       "group",
       "binary",
     };
@@ -158,9 +160,12 @@ enum FieldType {
   EXCHANGE,
   FLOAT,
   INT,
+  LANGUAGE,
   LENGTH,
   LOCALMKTDATE,
   MONTHYEAR,
+  MULTIPLECHARVALUE,
+  MULTIPLESTRINGVALUE,
   MULTIPLEVALUESTRING,
   NUMINGROUP,
   PERCENTAGE,
@@ -169,10 +174,15 @@ enum FieldType {
   QTY,
   SEQNUM,
   STRING,
+  TAGNUM,
+  TZTIMEONLY,
+  TZTIMESTAMP,
   UTCDATE,
   UTCDATEONLY,
   UTCTIMEONLY,
   UTCTIMESTAMP,
+  XMLDATA,
+  __END_FIELD_TYPE,   // Must be the last field
 };
 
 static const char* type_to_string(FieldType val) {
@@ -188,9 +198,12 @@ static const char* type_to_string(FieldType val) {
     "exchange",
     "float",
     "int",
+    "language",
     "length",
     "localmktdate",
     "monthyear",
+    "multiplecharvalue",
+    "multiplestringvalue",
     "multiplevaluestring",
     "numingroup",
     "percentage",
@@ -199,13 +212,17 @@ static const char* type_to_string(FieldType val) {
     "qty",
     "seqnum",
     "string",
+    "tagnum",
+    "tztimeonly",
+    "tztimestamp",
     "utcdate",
     "utcdateonly",
     "utctimeonly",
     "utctimestamp",
+    "xmldata",
   };
 
-  return val <= UTCTIMESTAMP ? s_vals[val] : s_vals[0];
+  return val < __END_FIELD_TYPE ? s_vals[val] : s_vals[0];
 }
 
 enum class DoubleFmt {
@@ -222,8 +239,8 @@ enum class TimeFmt {
   EpochSec,
   Binary,
   String,
-  Tuple,    // { {{Y,M,D},{HH,MM,SS}}, Microseconds }
-  Naive,    // Elixir's NaiveDataTime map
+  Tuple,          // { {{Y,M,D},{HH,MM,SS}}, Microseconds }
+  Naive,          // Elixir's NaiveDataTime map
   None
 };
 
@@ -785,46 +802,83 @@ inline bool decode_timestamp(tm& out, int& us, const char* p, size_t size, bool 
   int  y=0, mon=0, d=0, h=0, m=0, s=0;
   bool res;
 
+  if (size < 8) [[unlikely]]
+    return false;
+
   us = 0;
 
-  auto parse = [p](int offset, int len, int &i)
+  auto parse = [](const char* b, int len, int &i)
   {
-    auto b = p + offset;
     return str_to_int(b, b + len, i) != nullptr;
   };
 
-  switch (size)
-  {
+  auto end = p + size;
+  auto b   = end;
+  auto e   = b - 5;
+  auto sz  = size;
+  auto utc_offset = -1;
+
+  // Parse ...Z, ...+HH, ...+HH:MM ('+' could also be '-')
+  for(; b != e; --b) {
+    if (!(*b == 'Z' || *b == '+' || *b == '-'))
+      continue;
+    int hh = 0, mm = 0;
+    switch (end-b) {
+      case 1: // 'Z'
+        res = *b == 'Z';
+        utc_offset = 0;
+        break;
+      case 3:
+        res = parse(b+1, 2, hh);
+        utc_offset = hh*3600;  // in hours
+        break;
+      case 6:
+        res = parse(b+1, 2, hh) && *(b+3) == ':' && parse(b+4, 2, mm);
+        utc_offset = hh*3600 + mm*60; // hours and minutes
+        break;
+      default:
+        return false; 
+    }
+    if (!res) [[unlikely]]
+      return false;
+    if (*b == '-')
+      utc_offset = -utc_offset;
+    sz = end - b;
+    break;
+  }
+
+  switch (sz) {
     case 8:  // Format: YYYYMMDD
-      res  = parse(0, 4, y) && parse(4, 2, mon) && parse(6, 2, d);
+      res  = parse(p, 4, y) && parse(p+4, 2, mon) && parse(p+6, 2, d);
       h = m = s = 0;
       break;
     case 17: // Format: YYYYMMDD-HH:MI:SS
-      res  = parse(0, 4, y) && parse(4,  2, mon) && parse(6,  2, d) &&
-             parse(9, 2, h) && parse(12, 2, m)   && parse(15, 2, s);
+      res  = parse(p,   4, y) && parse(p+4,  2, mon) && parse(p+6,  2, d) &&
+             parse(p+9, 2, h) && parse(p+12, 2, m)   && parse(p+15, 2, s);
       break;
     case 21: // Read milliseconds: YYYYMMDD-HH:MI:SS.ttt
-      res  = parse(0, 4, y) && parse(4,  2, mon) && parse(6,  2, d) &&
-             parse(9, 2, h) && parse(12, 2, m)   && parse(15, 2, s) &&
-             parse(18,3, us);
+      res  = parse(p,   4, y) && parse(p+4,  2, mon) && parse(p+6,  2, d) &&
+             parse(p+9, 2, h) && parse(p+12, 2, m)   && parse(p+15, 2, s) &&
+             parse(p+18,3, us);
       us  *= 1000;
       break;
     case 24:  // Read microseconds: YYYYMMDD-HH:MI:SS.tttttt
-      res  = parse(0, 4, y) && parse(4,  2, mon) && parse(6,  2, d) &&
-             parse(9, 2, h) && parse(12, 2, m)   && parse(15, 2, s) &&
-             parse(18,6, us);
+      res  = parse(p,   4, y) && parse(p+4,  2, mon) && parse(p+6,  2, d) &&
+             parse(p+9, 2, h) && parse(p+12, 2, m)   && parse(p+15, 2, s) &&
+             parse(p+18,6, us);
       break;
     default:
       return false;
   }
 
   out = {
-    .tm_sec  = s,
-    .tm_min  = m,
-    .tm_hour = h,
-    .tm_mday = d,
-    .tm_mon  = mon  - 1,   // Months are between 0-11
-    .tm_year = y - 1900,   // Years since 1900
+    .tm_sec    = s,
+    .tm_min    = m,
+    .tm_hour   = h,
+    .tm_mday   = d,
+    .tm_mon    = mon  - 1,   // Months are between 0-11
+    .tm_year   = y - 1900,   // Years since 1900
+    .tm_gmtoff = utc_offset,
   };
 
   return res;
@@ -842,7 +896,7 @@ inline int64_t decode_timestamp(ErlNifEnv* env, const char* p, size_t size, bool
 
 template <int N, typename Ch = char>
 int encode_timestamp(Ch (&buf)[N], uint64_t usecs, TsType tt = TsType::Seconds,
-                     bool utc=true)
+                     bool utc=true, const char* zone = "")
 {
   static_assert(N > 24);
 
@@ -857,22 +911,20 @@ int encode_timestamp(Ch (&buf)[N], uint64_t usecs, TsType tt = TsType::Seconds,
 
   if (tt == TsType::Millisec) us /= 1000;
 
-  const auto fmt = tt == TsType::Seconds  ? "%04d%02d%02d-%02d:%02d:%02d"
-                 : tt == TsType::Millisec ? "%04d%02d%02d-%02d:%02d:%02d.%03d"
-                                          : "%04d%02d%02d-%02d:%02d:%02d.%06d";
+  const auto fmt = tt == TsType::Seconds  ? "%04d%02d%02d-%02d:%02d:%02d%s"
+                 : tt == TsType::Millisec ? "%04d%02d%02d-%02d:%02d:%02d.%03d%s"
+                                          : "%04d%02d%02d-%02d:%02d:%02d.%06d%s";
 
   return snprintf((char*)buf, N, fmt,
                   tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec, us);
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, us, zone);
 }
 
+template <int N, typename Ch, typename Fun>
 inline ERL_NIF_TERM
-encode_timestamp(ErlNifEnv* env, uint64_t usecs, TsType tt=TsType::Seconds,
-                 bool utc=true)
+encode_timestamp_priv(ErlNifEnv* env, Ch (&buf)[N], Fun fun)
 {
-  char buf[64];
-
-  auto n = encode_timestamp(buf, usecs, tt, utc);
+  auto n = fun();
 
   if (n == 0) [[unlikely]]
     return enif_make_badarg(env);
@@ -886,6 +938,57 @@ encode_timestamp(ErlNifEnv* env, uint64_t usecs, TsType tt=TsType::Seconds,
   memcpy(data, buf, n);
 
   return ret;
+}
+
+inline ERL_NIF_TERM
+encode_timestamp(ErlNifEnv* env, uint64_t usecs, TsType tt=TsType::Seconds,
+                 bool utc=true)
+{
+  char buf[256];
+  auto fun = [=, &buf]() { return encode_timestamp(buf, usecs, tt, utc); };
+  return encode_timestamp_priv(env, buf, fun);
+}
+
+template <int N, typename Ch = char>
+int encode_timestampz(Ch (&buf)[N], uint64_t usecs, TsType tt=TsType::Seconds,
+                      int utc_offset_secs=0)
+{
+  char zone[16];
+  auto p = zone;
+  
+  if (utc_offset_secs == 0)
+    *p++      = 'Z';
+  else {
+    auto val  = abs(utc_offset_secs);
+    *p++      = utc_offset_secs > 0 ? '+' : '-';
+    int hours = val   / 3600;
+    int tmp   = val   - hours*3600;
+    int mins  = tmp   / 60;
+    int h1    = hours / 10;
+    int h2    = hours - h1*10;
+    int m1    = mins  / 10;
+    int m2    = mins  - m1*10;
+    if (hours > 24) [[unlikely]]
+      return 0;
+    *p++ = '0' + h1;
+    *p++ = '0' + h2;
+    *p++ = ':';
+    *p++ = '0' + m1;
+    *p++ = '0' + m2;
+  }
+  *p = '\0';
+
+  return encode_timestamp(buf, usecs, tt, true, zone);
+}
+
+inline ERL_NIF_TERM
+encode_timestampz(ErlNifEnv* env, uint64_t usecs, TsType tt=TsType::Seconds,
+                 int utc_offset=0)
+{
+  char buf[256];
+  auto fun = [=, &buf]() { return encode_timestampz(buf, usecs, tt, utc_offset); };
+
+  return encode_timestamp_priv(env, buf, fun);
 }
 
 inline std::string term_to_field_name(ErlNifEnv* env, ERL_NIF_TERM term)
@@ -1477,6 +1580,13 @@ Field::encode(ErlNifEnv* env, int& offset, ErlNifBinary& res, ERL_NIF_TERM val)
         long n;
         if (!enif_get_long(env, val, &n) ||
             !(bval.size = encode_timestamp(tmp, n, pers()->ts_type()))) [[unlikely]]
+          return MAKE_ENCODE_ERROR(this, env, "invalid timestamp");
+        break;
+      }
+      case DataType::DATETIMEZ: {
+        long n;
+        if (!enif_get_long(env, val, &n) ||
+            !(bval.size = encode_timestampz(tmp, n, pers()->ts_type(), 0))) [[unlikely]]
           return MAKE_ENCODE_ERROR(this, env, "invalid timestamp");
         break;
       }
